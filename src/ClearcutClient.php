@@ -1,0 +1,299 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Clearcut\Video;
+
+use Clearcut\Video\Data\AnalysisProposal;
+use Clearcut\Video\Data\Brand;
+use Clearcut\Video\Data\DetectionProfile;
+use Clearcut\Video\Data\JobRequest;
+use Clearcut\Video\Data\JobStatus;
+use Clearcut\Video\Exceptions\ClearcutException;
+use Clearcut\Video\Exceptions\ClearcutRequestException;
+use Clearcut\Video\Exceptions\ClearcutUnavailableException;
+use Illuminate\Http\Client\ConnectionException;
+use Illuminate\Http\Client\Factory as HttpFactory;
+use Illuminate\Http\Client\Response;
+
+/**
+ * HTTP client for a clearcut-video service.
+ *
+ * Deliberately knows nothing about the application using it: no models, no
+ * tables, no audit log, no permission names. Everything specific to a project
+ * — claims, queue jobs, authorisation, audit trail — is bound to that
+ * project's own schema and belongs in its code, not here.
+ *
+ * What this DOES own is the service's contract: the routes, the payload
+ * shapes, and turning the failures into exceptions a caller can act on.
+ *
+ * Processing takes minutes, so every job route returns immediately and is
+ * polled. The service is a stateless worker: the authoritative record of what
+ * was requested lives in the calling application, not in it.
+ */
+class ClearcutClient
+{
+    public function __construct(
+        private readonly HttpFactory $http,
+        private readonly string $baseUrl,
+        private readonly string $token,
+        private readonly int $timeout = 30,
+        private readonly int $retries = 2,
+    ) {
+    }
+
+    /**
+     * Whether the service is reachable, and which host binaries it resolved.
+     *
+     * Never throws: a health check that throws cannot be used in the place a
+     * health check is wanted. `reachable` is false when it could not be
+     * contacted at all.
+     *
+     * @return array{reachable: bool, status?: string, binaries?: array<string, bool>, error?: string}
+     */
+    public function health(): array
+    {
+        try {
+            $response = $this->http
+                ->timeout(5)
+                ->get($this->url('/health'));
+
+            if ($response->failed()) {
+                return ['reachable' => false, 'error' => "HTTP {$response->status()}"];
+            }
+
+            return ['reachable' => true, ...$response->json()];
+        } catch (ConnectionException $e) {
+            return ['reachable' => false, 'error' => $e->getMessage()];
+        }
+    }
+
+    /**
+     * Queue a job that detects and encodes in one pass.
+     */
+    public function process(JobRequest $request): JobStatus
+    {
+        return JobStatus::fromArray(
+            $this->send('POST', '/jobs', $request->toArray())
+        );
+    }
+
+    /**
+     * Queue a job that only detects, for a human to review.
+     *
+     * The regions come back through `proposal()` once this job completes —
+     * detection takes minutes, so a reviewer starts this and comes back.
+     */
+    public function analyze(JobRequest $request): JobStatus
+    {
+        return JobStatus::fromArray(
+            $this->send('POST', '/analyze', $request->toArray())
+        );
+    }
+
+    /**
+     * Current state of a job. This is what a poller calls.
+     */
+    public function job(string $jobId): JobStatus
+    {
+        return JobStatus::fromArray(
+            $this->send('GET', "/jobs/{$jobId}")
+        );
+    }
+
+    /**
+     * Ask for a job to stop.
+     *
+     * Returns false when it had already finished — not an error, just a race
+     * between the cancel and the work. Nothing half-written reaches storage
+     * either way: output is verified before it is uploaded.
+     */
+    public function cancel(string $jobId): bool
+    {
+        try {
+            $this->send('DELETE', "/jobs/{$jobId}");
+
+            return true;
+        } catch (ClearcutRequestException $e) {
+            if ($e->status === 409) {
+                return false;
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * The regions an analysis proposed, and the verdicts recorded so far.
+     */
+    public function proposal(string $jobId): AnalysisProposal
+    {
+        return AnalysisProposal::fromArray(
+            $this->send('GET', "/review/{$jobId}")
+        );
+    }
+
+    /**
+     * Record keep/drop verdicts. Partial updates are fine.
+     *
+     * Saving as decisions are made, rather than only at the end, means a
+     * reviewer working through thirty regions does not lose the first twenty
+     * by closing the tab.
+     *
+     * @param  array<string, string>  $decisions  region name => kept|dropped|undecided
+     * @return array{counts: array<string, int>, fully_reviewed: bool}
+     */
+    public function decide(string $jobId, array $decisions): array
+    {
+        $body = $this->send('PATCH', "/review/{$jobId}", ['decisions' => $decisions]);
+
+        return [
+            'counts' => $body['counts'] ?? [],
+            'fully_reviewed' => (bool) ($body['fully_reviewed'] ?? false),
+        ];
+    }
+
+    /**
+     * Encode using the regions the reviewer kept.
+     *
+     * Undecided regions are NOT covered. The service refuses to apply a
+     * half-reviewed proposal unless `allowUndecided` is set, because doing so
+     * silently exports a video missing the boxes nobody reached — which looks
+     * exactly like a correct export.
+     */
+    public function apply(
+        string $jobId,
+        string $redactionStyle = 'blur',
+        string $brand = '',
+        string $markType = 'logo',
+        bool $allowUndecided = false,
+    ): JobStatus {
+        return JobStatus::fromArray(
+            $this->send('POST', "/review/{$jobId}/apply", [
+                'redaction_style' => $redactionStyle,
+                'partner' => $brand,
+                'mark_type' => $markType,
+                'allow_undecided' => $allowUndecided,
+            ])
+        );
+    }
+
+    /**
+     * Throw away a proposal nobody is going to review.
+     */
+    public function discardProposal(string $jobId): void
+    {
+        $this->send('DELETE', "/review/{$jobId}");
+    }
+
+    /**
+     * The detection profiles this deployment offers.
+     *
+     * Fetched rather than hardcoded so a UI renders whatever the service has:
+     * a retuned profile then reaches every client without a release.
+     *
+     * @return array<int, DetectionProfile>
+     */
+    public function profiles(): array
+    {
+        $body = $this->send('GET', '/profiles');
+
+        return array_map(
+            DetectionProfile::fromArray(...),
+            $body['profiles'] ?? []
+        );
+    }
+
+    /**
+     * The brands this deployment can watermark with.
+     *
+     * Also fetched rather than hardcoded: which brands exist is the service's
+     * configuration, and a client that guesses will name one that is not there.
+     *
+     * @return array<int, Brand>
+     */
+    public function brands(): array
+    {
+        $body = $this->send('GET', '/brands');
+
+        return array_map(Brand::fromArray(...), $body['brands'] ?? []);
+    }
+
+    // --- Transport ---------------------------------------------------------
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function send(string $method, string $path, array $payload = []): array
+    {
+        try {
+            $request = $this->http
+                ->withToken($this->token)
+                ->timeout($this->timeout)
+                // Retries cover a restarting service and transient network
+                // faults. Only the transport is retried — a 4xx is a decision,
+                // not a blip, and repeating it would just fail again.
+                ->retry($this->retries, 250, throw: false);
+
+            $response = match ($method) {
+                'GET' => $request->get($this->url($path)),
+                'POST' => $request->post($this->url($path), $payload),
+                'PATCH' => $request->patch($this->url($path), $payload),
+                'DELETE' => $request->delete($this->url($path)),
+                default => throw new ClearcutException("Unsupported method {$method}"),
+            };
+        } catch (ConnectionException $e) {
+            // Distinguished from a rejection on purpose: unreachable is worth
+            // retrying later, while a rejected request will be rejected again.
+            throw new ClearcutUnavailableException(
+                "clearcut-video is unreachable at {$this->baseUrl}: {$e->getMessage()}",
+                previous: $e,
+            );
+        }
+
+        if ($response->failed()) {
+            throw new ClearcutRequestException(
+                $this->describeFailure($response, $method, $path),
+                $response->status(),
+                $response->json() ?? [],
+            );
+        }
+
+        return $response->json() ?? [];
+    }
+
+    /**
+     * Turn a failure into one line naming what actually went wrong.
+     *
+     * The service's validation errors are nested inside `detail`, and without
+     * unwrapping them a caller sees "HTTP 422" with no hint of which field the
+     * service objected to.
+     */
+    private function describeFailure(Response $response, string $method, string $path): string
+    {
+        $body = $response->json();
+        $detail = $body['detail'] ?? null;
+
+        if (is_array($detail)) {
+            $messages = array_filter(array_map(
+                static fn ($item) => is_array($item) ? ($item['msg'] ?? null) : null,
+                $detail,
+            ));
+            $detail = $messages ? implode('; ', $messages) : json_encode($detail);
+        }
+
+        return sprintf(
+            '%s %s failed with %d%s',
+            $method,
+            $path,
+            $response->status(),
+            $detail ? ": {$detail}" : '',
+        );
+    }
+
+    private function url(string $path): string
+    {
+        return rtrim($this->baseUrl, '/').$path;
+    }
+}
