@@ -9,10 +9,16 @@ PII redaction for screen recordings.
 a service provider. It knows the service's contract and nothing else — no
 models, no tables, no audit log, no permission names.
 
-**In `examples/`**: a queued job and a controller, to copy and adapt. They are
-examples rather than package code because everything they do beyond calling the
-client is bound to one application's schema. A package that guessed at your
-claim columns would be harder to use than writing eighty lines yourself.
+**In `examples/`**: a migration, a model, a queued job and a controller, to
+copy and adapt. They are examples rather than package code because everything
+they do beyond calling the client is bound to one application's schema. A
+package that guessed at your claim columns would be harder to use than writing
+eighty lines yourself.
+
+They reference nothing an application might not have. The migration creates a
+standalone table with a polymorphic `subject`, so it attaches to whatever holds
+recordings without knowing what that is — copied into a fresh Laravel install,
+they migrate and run as they stand.
 
 That split is the whole design. The reusable part is genuinely reusable
 because it refuses to know anything about you.
@@ -24,20 +30,23 @@ While this lives inside the service's repository, point composer at the path:
 ```json
 {
     "repositories": [
-        { "type": "path", "url": "../clearcut-video/laravel" }
-    ],
-    "require": {
-        "clearcut/video-client": "*"
-    }
+        { "type": "path", "url": "../clearcut-video/laravel", "options": { "symlink": false } }
+    ]
 }
 ```
 
-Then:
-
 ```bash
-composer require clearcut/video-client
-php artisan vendor:publish --tag=clearcut-config
+composer require clearcut/video-client:^1.0
+php artisan vendor:publish --tag=clearcut-config   # optional; defaults work
 ```
+
+The version constraint is not optional. A path repository with no git tag
+resolves to `dev-master`, which a project on the default
+`minimum-stability: stable` refuses — hence the explicit `version` in this
+package's own `composer.json`.
+
+Verified end to end in a clean Laravel 12 install on PHP 8.2: install,
+migrate, resolve, call. Nothing else was present.
 
 ```dotenv
 CLEARCUT_URL=http://10.8.0.2:8000

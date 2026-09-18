@@ -2,9 +2,9 @@
 
 declare(strict_types=1);
 
-namespace App\Http\Controllers\Admin;
+namespace App\Http\Controllers;
 
-use App\Http\Controllers\Controller;
+use App\Models\ClearcutJob;
 use Clearcut\Video\ClearcutClient;
 use Clearcut\Video\Data\JobRequest;
 use Clearcut\Video\Exceptions\ClearcutRequestException;
@@ -13,25 +13,33 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 /**
- * EXAMPLE — copy into your application and adapt it.
+ * EXAMPLE — copy into app/Http/Controllers/ and adapt.
  *
- * The admin panel talks to THIS, never to clearcut-video. That is not
- * ceremony: a browser reaching the service directly would bypass every
- * authorisation gate below, and the service has no idea who a user is.
+ * The admin panel talks to THIS, never to the service. That is not ceremony:
+ * a browser reaching the service directly bypasses every authorisation check
+ * here, and the service has no idea who a user is.
  *
- * Three things this layer owns and the package deliberately does not:
+ * Three things this layer owns, which the package deliberately does not:
  *
- *   - **Authorisation.** Whose permission names these are is per application.
- *   - **Ownership.** A recording id from a request is a claim, not a fact;
- *     every route re-checks that this user may touch this recording.
+ *   - **Authorisation.** Whose permission names apply is per application, so
+ *     the middleware line below is a placeholder to replace.
+ *   - **Ownership.** An id in a URL is a claim, not a fact. Without a check,
+ *     any authenticated user could work on anyone's recording by changing a
+ *     number.
  *   - **Audit.** Who asked for what, in the application's own trail.
+ *
+ * It works against `ClearcutJob` and its standalone table so it runs in a
+ * fresh Laravel install with nothing else present.
  */
 class RecordingReviewController extends Controller
 {
     public function __construct(private readonly ClearcutClient $clearcut)
     {
-        // Adapt to your own permission names.
-        $this->middleware('permission:recordings.redact');
+        // Replace with your own gate. Left commented rather than invented,
+        // because a permission name this application does not have would fail
+        // in a way that looks like the package being broken.
+        //
+        // $this->middleware('permission:recordings.redact');
     }
 
     /**
@@ -45,25 +53,20 @@ class RecordingReviewController extends Controller
     {
         try {
             return response()->json([
-                'brands' => array_map(
-                    static fn ($brand) => [
-                        'slug' => $brand->slug,
-                        'label' => $brand->label,
-                        'mark_types' => $brand->availableMarkTypes(),
-                    ],
-                    $this->clearcut->brands(),
-                ),
-                'profiles' => array_map(
-                    static fn ($profile) => [
-                        'name' => $profile->name,
-                        'sample_fps' => $profile->sampleFps,
-                    ],
-                    $this->clearcut->profiles(),
-                ),
+                'brands' => array_map(static fn ($brand) => [
+                    'slug' => $brand->slug,
+                    'label' => $brand->label,
+                    'mark_types' => $brand->availableMarkTypes(),
+                ], $this->clearcut->brands()),
+
+                'profiles' => array_map(static fn ($profile) => [
+                    'name' => $profile->name,
+                    'sample_fps' => $profile->sampleFps,
+                ], $this->clearcut->profiles()),
             ]);
         } catch (ClearcutUnavailableException $e) {
             // 503, not 500: the panel should say "try again", not "something
-            // broke". Nothing here is wrong with the request.
+            // broke". Nothing about the request was wrong.
             return response()->json(['message' => $e->getMessage()], 503);
         }
     }
@@ -71,63 +74,92 @@ class RecordingReviewController extends Controller
     /**
      * Start a detection run for review. Returns a job to poll.
      */
-    public function analyze(Request $request, int $recordingId): JsonResponse
+    public function analyze(Request $request): JsonResponse
     {
-        $recording = $this->authorizedRecording($recordingId);
-
         $validated = $request->validate([
+            'source_key' => 'required|string|max:1024',
             'mode' => 'required|in:fixed,auto,ai',
             'profile' => 'nullable|in:fast,balanced,thorough',
         ]);
 
+        $record = ClearcutJob::create([
+            'source_key' => $validated['source_key'],
+            'requested_by' => $request->user()?->getAuthIdentifier(),
+        ]);
+
         try {
             $status = $this->clearcut->analyze(new JobRequest(
-                videoId: (string) $recording->id,
-                sourceKey: $recording->storage_key,
+                videoId: (string) $record->id,
+                sourceKey: $record->source_key,
                 mode: $validated['mode'],
                 // Detection only — nothing is encoded, so no brand is needed.
                 markType: JobRequest::MARK_NONE,
                 profile: $validated['profile'] ?? 'balanced',
             ));
         } catch (ClearcutRequestException $e) {
+            $record->update(['state' => 'failed', 'error' => $e->getMessage()]);
+
             return response()->json(['message' => $e->getMessage()], 422);
         } catch (ClearcutUnavailableException $e) {
+            $record->delete();
+
             return response()->json(['message' => $e->getMessage()], 503);
         }
 
-        $recording->update(['clearcut_analysis_id' => $status->jobId]);
+        $record->update([
+            'service_analysis_id' => $status->jobId,
+            'state' => $status->state,
+        ]);
 
         // Record who asked, in your own audit trail.
-        // AdminAuditLog::record($request->user(), 'recording.analyze', $recording);
 
-        return response()->json($status->toArray(), 202);
+        return response()->json(['id' => $record->id] + $status->toArray(), 202);
     }
 
     /**
      * Poll an analysis or an encode.
      */
-    public function status(int $recordingId, string $jobId): JsonResponse
+    public function status(ClearcutJob $record): JsonResponse
     {
-        $this->authorizedRecording($recordingId);
+        $serviceJobId = $record->service_job_id ?? $record->service_analysis_id;
+
+        if ($serviceJobId === null) {
+            return response()->json(['message' => 'Nothing has been started yet'], 409);
+        }
 
         try {
-            return response()->json($this->clearcut->job($jobId)->toArray());
+            $status = $this->clearcut->job($serviceJobId);
         } catch (ClearcutRequestException $e) {
+            // The service forgets finished jobs after an hour. The row here is
+            // the authoritative record, so a 404 from the service is not an
+            // error if this row already knows the outcome.
+            if ($e->isNotFound() && $record->finished_at !== null) {
+                return response()->json($record->only([
+                    'state', 'stage', 'progress', 'output_key', 'audit_key', 'error',
+                ]));
+            }
+
             return response()->json(['message' => $e->getMessage()], $e->status);
         }
+
+        $record->syncFrom($status);
+
+        return response()->json($status->toArray());
     }
 
     /**
      * The proposed regions, for the review screen.
      */
-    public function proposal(int $recordingId, string $jobId): JsonResponse
+    public function proposal(ClearcutJob $record): JsonResponse
     {
-        $this->authorizedRecording($recordingId);
+        if ($record->service_analysis_id === null) {
+            return response()->json(['message' => 'No analysis was started'], 409);
+        }
 
         try {
-            $proposal = $this->clearcut->proposal($jobId);
+            $proposal = $this->clearcut->proposal($record->service_analysis_id);
         } catch (ClearcutRequestException $e) {
-            // A proposal expires after a week; the panel should offer to
+            // A proposal expires after a week. The panel should offer to
             // re-analyse rather than show an error with no way forward.
             return response()->json(['message' => $e->getMessage()], $e->status);
         }
@@ -147,7 +179,8 @@ class RecordingReviewController extends Controller
                 'reason' => $region->reason,
             ], $proposal->regions),
             // Surfaced, not hidden: these are regions the service could not
-            // resolve and did not guess at, so the reviewer should know.
+            // resolve and refused to guess at, so the reviewer should know
+            // something on this recording is uncovered.
             'rejected' => $proposal->rejected,
         ]);
     }
@@ -155,18 +188,20 @@ class RecordingReviewController extends Controller
     /**
      * Record keep/drop verdicts as the reviewer makes them.
      */
-    public function decide(Request $request, int $recordingId, string $jobId): JsonResponse
+    public function decide(Request $request, ClearcutJob $record): JsonResponse
     {
-        $this->authorizedRecording($recordingId);
-
         $validated = $request->validate([
             'decisions' => 'required|array|min:1|max:2000',
             'decisions.*' => 'required|in:kept,dropped,undecided',
         ]);
 
+        if ($record->service_analysis_id === null) {
+            return response()->json(['message' => 'No analysis was started'], 409);
+        }
+
         try {
             return response()->json(
-                $this->clearcut->decide($jobId, $validated['decisions'])
+                $this->clearcut->decide($record->service_analysis_id, $validated['decisions'])
             );
         } catch (ClearcutRequestException $e) {
             return response()->json(['message' => $e->getMessage()], $e->status);
@@ -176,52 +211,40 @@ class RecordingReviewController extends Controller
     /**
      * Encode what the reviewer kept.
      */
-    public function apply(Request $request, int $recordingId, string $jobId): JsonResponse
+    public function apply(Request $request, ClearcutJob $record): JsonResponse
     {
-        $recording = $this->authorizedRecording($recordingId);
-
         $validated = $request->validate([
             'redaction_style' => 'required|in:blur,solid,pixelate',
-            'brand' => 'nullable|string',
+            'brand' => 'nullable|string|max:64',
             'mark_type' => 'required|in:logo,text,none',
             'allow_undecided' => 'boolean',
         ]);
 
+        if ($record->service_analysis_id === null) {
+            return response()->json(['message' => 'No analysis was started'], 409);
+        }
+
         try {
             $status = $this->clearcut->apply(
-                jobId: $jobId,
+                jobId: $record->service_analysis_id,
                 redactionStyle: $validated['redaction_style'],
                 brand: $validated['brand'] ?? '',
                 markType: $validated['mark_type'],
                 allowUndecided: (bool) ($validated['allow_undecided'] ?? false),
             );
         } catch (ClearcutRequestException $e) {
-            // 409 means regions are still undecided and would not be covered.
-            // Passed through as-is, so the panel can offer to go back rather
-            // than presenting it as a generic failure.
+            // A 409 means regions are still undecided and would not be
+            // covered. Passed through as-is so the panel can offer to go back,
+            // rather than presenting it as a generic failure.
             return response()->json(['message' => $e->getMessage()], $e->status);
         }
 
-        $recording->update(['clearcut_job_id' => $status->jobId]);
-
-        // AdminAuditLog::record($request->user(), 'recording.redact_apply', $recording);
+        $record->update([
+            'service_job_id' => $status->jobId,
+            'state' => $status->state,
+            'reviewed_by_human' => true,
+        ]);
 
         return response()->json($status->toArray(), 202);
-    }
-
-    /**
-     * Resolve the recording and check this user may touch it.
-     *
-     * An id in a URL is a claim, not proof. Without this, any authenticated
-     * user with the permission could analyse and export anyone's recording by
-     * changing a number.
-     */
-    private function authorizedRecording(int $recordingId): object
-    {
-        $recording = \App\Models\Recording::findOrFail($recordingId);
-
-        $this->authorize('view', $recording);
-
-        return $recording;
     }
 }

@@ -3,6 +3,8 @@
     "description": "Laravel client for a clearcut-video service: watermarking and PII redaction for screen recordings",
     "type": "library",
     "license": "proprietary",
+    "//": "Declared explicitly because this is installed from a path repository. Without it composer infers dev-master, which a project with the default minimum-stability=stable then refuses to install. Bump it when the service's contract changes.",
+    "version": "1.0.0",
     "require": {
         "php": "^8.2",
         "illuminate/http": "^11.0|^12.0",
