@@ -9,8 +9,8 @@ PII redaction for screen recordings.
 a service provider. It knows the service's contract and nothing else — no
 models, no tables, no audit log, no permission names.
 
-**In `examples/`**: a migration, a model, a queued job and a controller, to
-copy and adapt. They are examples rather than package code because everything
+**In `examples/`**: a migration, a model, a queued job, a controller and its
+routes, to copy and adapt. They are examples rather than package code because everything
 they do beyond calling the client is bound to one application's schema. A
 package that guessed at your claim columns would be harder to use than writing
 eighty lines yourself.
@@ -45,8 +45,17 @@ resolves to `dev-master`, which a project on the default
 `minimum-stability: stable` refuses — hence the explicit `version` in this
 package's own `composer.json`.
 
-Verified end to end in a clean Laravel 12 install on PHP 8.2: install,
-migrate, resolve, call. Nothing else was present.
+Laravel 12 ships without `routes/api.php`. Run `php artisan install:api`, then
+add the routes from `examples/routes.php` — their paths match what the React
+package's adapter calls, so changing one means changing the other.
+
+Verified end to end in a clean Laravel 12 install on PHP 8.2, against a real
+service and a real S3 bucket: analyse, review, apply, encode. The result landed
+beside an untouched original with an audit file recording both hashes.
+
+`videoUrl()` is a stub returning 501 — it has to be written against whatever
+disk holds your recordings. The review screen works without it, listing regions
+rather than showing them over the video.
 
 ```dotenv
 CLEARCUT_URL=http://10.8.0.2:8000

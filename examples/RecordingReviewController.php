@@ -148,6 +148,64 @@ class RecordingReviewController extends Controller
     }
 
     /**
+     * Ask a running job to stop.
+     *
+     * Safe at any point: the service verifies output before uploading it, so
+     * a cancelled job leaves nothing half-written in storage.
+     */
+    public function cancel(ClearcutJob $record): JsonResponse
+    {
+        $serviceJobId = $record->service_job_id ?? $record->service_analysis_id;
+
+        if ($serviceJobId === null) {
+            return response()->json(['message' => 'Nothing has been started yet'], 409);
+        }
+
+        try {
+            $stopped = $this->clearcut->cancel($serviceJobId);
+        } catch (ClearcutUnavailableException $e) {
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
+
+        if ($stopped) {
+            $record->update([
+                'state' => 'cancelled',
+                'claimed_at' => null,
+                'finished_at' => now(),
+            ]);
+        }
+
+        // False means it had already finished — a race between the cancel and
+        // the work, not an error.
+        return response()->json(['cancelled' => $stopped]);
+    }
+
+    /**
+     * A short-lived URL the browser can play.
+     *
+     * Adapt to wherever the recording lives. The important part is that this
+     * is signed and expires: the review screen holds it for as long as the tab
+     * is open, and it points at a recording full of personal data. A permanent
+     * link, or a public object, is how that leaks.
+     */
+    public function videoUrl(ClearcutJob $record): JsonResponse
+    {
+        // Replace with your own storage disk. For S3:
+        //
+        //   $url = Storage::disk('s3')->temporaryUrl(
+        //       $record->source_key,
+        //       now()->addMinutes(30),
+        //   );
+        //
+        // Returning the key alone would be useless to a browser, and returning
+        // a permanent URL would outlive the review.
+        return response()->json([
+            'url' => null,
+            'message' => 'Implement videoUrl() against your storage disk',
+        ], 501);
+    }
+
+    /**
      * The proposed regions, for the review screen.
      */
     public function proposal(ClearcutJob $record): JsonResponse
