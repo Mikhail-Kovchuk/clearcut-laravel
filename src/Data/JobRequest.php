@@ -15,6 +15,9 @@ use InvalidArgumentException;
  */
 final class JobRequest
 {
+    /** No redaction at all — for a watermark-only job. */
+    public const MODE_NONE = 'none';
+
     public const MODE_FIXED = 'fixed';
 
     public const MODE_AUTO = 'auto';
@@ -61,13 +64,21 @@ final class JobRequest
 
         // The service refuses these too, but failing here names the caller's
         // own line rather than a rejected HTTP request.
-        if (! in_array($mode, [self::MODE_FIXED, self::MODE_AUTO, self::MODE_AI], true)) {
+        if (! in_array($mode, [self::MODE_NONE, self::MODE_FIXED, self::MODE_AUTO, self::MODE_AI], true)) {
             throw new InvalidArgumentException("Unknown mode: {$mode}");
         }
 
         if ($markType !== self::MARK_NONE && $brand === '') {
             throw new InvalidArgumentException(
                 "markType={$markType} needs a brand; pass markType=none for redaction only"
+            );
+        }
+
+        // Neither redacting nor watermarking would re-encode the recording
+        // into a copy identical but for a generation of h264 loss.
+        if ($mode === self::MODE_NONE && $markType === self::MARK_NONE) {
+            throw new InvalidArgumentException(
+                'nothing to do: mode=none skips redaction and markType=none skips the watermark'
             );
         }
     }

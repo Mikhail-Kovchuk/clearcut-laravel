@@ -219,6 +219,46 @@ class ClearcutClient
         return array_map(Brand::fromArray(...), $body['brands'] ?? []);
     }
 
+    /**
+     * The mark a brand would burn in.
+     *
+     * A logo comes back as raw PNG bytes under `image`; a wordmark as its text.
+     * Worth fetching because a brand name alone does not say which asset lands
+     * on the footage, and the burn-in cannot be undone.
+     *
+     * @return array{image: string}|array{mark_type: string, text: string}
+     */
+    public function brandPreview(string $slug, string $markType = 'logo'): array
+    {
+        $url = $this->url("/brands/{$slug}/preview?mark_type={$markType}");
+
+        try {
+            $response = $this->http
+                ->withToken($this->token)
+                ->timeout($this->timeout)
+                ->get($url);
+        } catch (ConnectionException $e) {
+            throw new ClearcutUnavailableException(
+                "clearcut-video is unreachable at {$this->baseUrl}: {$e->getMessage()}",
+                previous: $e,
+            );
+        }
+
+        if ($response->failed()) {
+            throw new ClearcutRequestException(
+                $this->describeFailure($response, 'GET', "/brands/{$slug}/preview"),
+                $response->status(),
+                $response->json() ?? [],
+            );
+        }
+
+        // Binary for a logo, JSON for a wordmark — decided by what was asked
+        // for rather than by sniffing the body.
+        return $markType === 'text'
+            ? ($response->json() ?? [])
+            : ['image' => $response->body()];
+    }
+
     // --- Transport ---------------------------------------------------------
 
     /**

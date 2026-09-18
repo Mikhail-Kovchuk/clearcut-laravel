@@ -72,12 +72,46 @@ class RecordingReviewController extends Controller
     }
 
     /**
+     * The mark a brand would burn in, proxied from the service.
+     *
+     * Proxied rather than linked: the service is not reachable from a browser,
+     * and its brand assets live beside its own config. A logo comes back as an
+     * image, a wordmark as JSON.
+     */
+    public function brandPreview(Request $request, string $slug): mixed
+    {
+        $markType = $request->query('mark_type', 'logo') === 'text' ? 'text' : 'logo';
+
+        try {
+            $preview = $this->clearcut->brandPreview($slug, $markType);
+        } catch (ClearcutRequestException $e) {
+            return response()->json(['message' => $e->getMessage()], $e->status);
+        } catch (ClearcutUnavailableException $e) {
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
+
+        if ($markType === 'text') {
+            return response()->json($preview);
+        }
+
+        return response($preview['image'], 200, [
+            'Content-Type' => 'image/png',
+            // Brand assets change when someone edits the service's config,
+            // which is rare. An hour stops a batch refetching the same logo.
+            'Cache-Control' => 'private, max-age=3600',
+        ]);
+    }
+
+    /**
      * Start a detection run for review. Returns a job to poll.
      */
     public function analyze(Request $request): JsonResponse
     {
         $validated = $request->validate([
             'source_key' => 'required|string|max:1024',
+            // No 'none' here: an analysis exists to find regions, and with
+            // redaction off there is nothing to find. A watermark-only job
+            // goes straight to process().
             'mode' => 'required|in:fixed,auto,ai',
             'profile' => 'nullable|in:fast,balanced,thorough',
         ]);
@@ -96,6 +130,13 @@ class RecordingReviewController extends Controller
                 markType: JobRequest::MARK_NONE,
                 profile: $validated['profile'] ?? 'balanced',
             ));
+        } catch (\InvalidArgumentException $e) {
+            // The DTO refuses impossible combinations before any request is
+            // made. That is the caller's mistake, not a server failure — 422,
+            // not the 500 an uncaught exception would produce.
+            $record->delete();
+
+            return response()->json(['message' => $e->getMessage()], 422);
         } catch (ClearcutRequestException $e) {
             $record->update(['state' => 'failed', 'error' => $e->getMessage()]);
 

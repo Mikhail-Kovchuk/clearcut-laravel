@@ -27,6 +27,10 @@ Route::middleware(['auth:sanctum'])
         // the service's config reaches the UI with no frontend release.
         Route::get('options', [RecordingReviewController::class, 'options']);
 
+        // The mark itself, so the settings form can show what will be
+        // burned in. Proxied because the browser cannot reach the service.
+        Route::get('brands/{slug}/preview', [RecordingReviewController::class, 'brandPreview']);
+
         // Start detection. Returns a job to poll; the work takes minutes, so
         // nothing here holds a request open waiting for it.
         Route::post('{recording}/analyze', [RecordingReviewController::class, 'analyze']);
