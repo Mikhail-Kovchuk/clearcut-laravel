@@ -29,6 +29,8 @@ final class JobStatus
      * @param  int|null  $regions  how many were covered, once known
      * @param  int  $rejectedRegions  proposed but outside the frame, and therefore not covered
      * @param  array{width: int, height: int}|null  $frame  output geometry; regions are in these pixels
+     * @param  string  $batchId  set when this job was submitted as one of several sharing settings
+     * @param  float|null  $duration  the recording's length in seconds, null until it has been probed
      */
     public function __construct(
         public readonly string $jobId,
@@ -37,6 +39,8 @@ final class JobStatus
         public readonly float $progress = 0.0,
         public readonly string $kind = 'process',
         public readonly string $videoId = '',
+        public readonly string $batchId = '',
+        public readonly ?float $duration = null,
         public readonly ?string $outputKey = null,
         public readonly ?string $auditKey = null,
         public readonly ?int $regions = null,
@@ -58,6 +62,11 @@ final class JobStatus
             progress: (float) ($data['progress'] ?? 0.0),
             kind: (string) ($data['kind'] ?? 'process'),
             videoId: (string) ($data['video_id'] ?? ''),
+            batchId: (string) ($data['batch_id'] ?? ''),
+            // Left null rather than cast to 0.0 when absent: a batch sizing its
+            // progress segments must be able to tell "not probed yet" from "a
+            // recording of no length".
+            duration: isset($data['duration']) ? (float) $data['duration'] : null,
             outputKey: $data['output_key'] ?? null,
             auditKey: $data['audit_key'] ?? null,
             regions: isset($data['regions']) ? (int) $data['regions'] : null,
@@ -111,6 +120,8 @@ final class JobStatus
             'stage' => $this->stage,
             'progress' => $this->progress,
             'video_id' => $this->videoId,
+            'batch_id' => $this->batchId ?: null,
+            'duration' => $this->duration,
             'output_key' => $this->outputKey,
             'audit_key' => $this->auditKey,
             'regions' => $this->regions,

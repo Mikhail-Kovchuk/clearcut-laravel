@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Clearcut\Video;
 
 use Clearcut\Video\Data\AnalysisProposal;
+use Clearcut\Video\Data\BatchRequest;
+use Clearcut\Video\Data\BatchStatus;
 use Clearcut\Video\Data\Brand;
 use Clearcut\Video\Data\DetectionProfile;
 use Clearcut\Video\Data\JobRequest;
@@ -89,6 +91,49 @@ class ClearcutClient
         return JobStatus::fromArray(
             $this->send('POST', '/analyze', $request->toArray())
         );
+    }
+
+    /**
+     * Queue up to five recordings under one settings choice.
+     *
+     * A batch is a grouping, not a transaction: each recording succeeds or
+     * fails on its own. Handle a partial failure by reporting which recordings
+     * need redoing, not by discarding the ones that worked — those are finished
+     * encodes, and minutes of work each.
+     */
+    public function processBatch(BatchRequest $request): BatchStatus
+    {
+        return BatchStatus::fromArray(
+            $this->send('POST', '/batches', $request->toArray())
+        );
+    }
+
+    /**
+     * The whole batch's state in one request.
+     *
+     * One call rather than one per job: five jobs polled separately are five
+     * round trips for a single progress bar, and they are then read at slightly
+     * different moments — which shows up as a total that moves backwards.
+     */
+    public function batch(string $batchId): BatchStatus
+    {
+        return BatchStatus::fromArray(
+            $this->send('GET', "/batches/{$batchId}")
+        );
+    }
+
+    /**
+     * Stop whatever in a batch is still running.
+     *
+     * Returns how many were actually stopped. A batch where four of five had
+     * already finished is not an error — the count is how a caller tells that
+     * apart from a batch where nothing was cancellable.
+     */
+    public function cancelBatch(string $batchId): int
+    {
+        $body = $this->send('DELETE', "/batches/{$batchId}");
+
+        return (int) ($body['cancelled'] ?? 0);
     }
 
     /**

@@ -86,6 +86,41 @@ $status = $this->clearcut->job($status->jobId);
 $status->finished();   // done | failed | cancelled
 ```
 
+### Batches
+
+Up to five recordings under one settings choice. The settings are shared by
+construction — one `JobRequest` template and a list of recordings — so "one set
+of settings for all" cannot drift into per-video overrides.
+
+```php
+use Clearcut\Video\Data\BatchRequest;
+
+$batch = $this->clearcut->processBatch(BatchRequest::of(
+    ['12' => 'media/originals/12/source.mp4',
+     '13' => 'media/originals/13/source.mp4'],
+    new JobRequest(
+        videoId: 'unused-by-the-batch',   // each recording carries its own
+        sourceKey: 'unused-by-the-batch',
+        mode: JobRequest::MODE_AUTO,
+        brand: 'acme',
+    ),
+));
+
+$batch = $this->clearcut->batch($batch->batchId);   // the whole batch, one request
+$batch->progress;      // 0..1, weighted by each recording's length
+$batch->failures();    // the recordings that need redoing
+$batch->successes();   // keep these — they are finished encodes
+```
+
+**A batch is a grouping, not a transaction.** Each recording succeeds or fails
+on its own, so `failed()` means something in it needs redoing rather than that
+nothing was produced. Report the failures; do not discard the successes.
+
+`cancelBatch()` returns how many jobs it actually stopped. Cancellation is
+cooperative — a job reaches `cancelled` at its next check, and one already past
+that point finishes normally, which is why the count can be lower than the
+batch size without anything being wrong.
+
 ### Review
 
 ```php
