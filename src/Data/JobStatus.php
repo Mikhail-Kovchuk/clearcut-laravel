@@ -31,6 +31,9 @@ final class JobStatus
      * @param  array{width: int, height: int}|null  $frame  output geometry; regions are in these pixels
      * @param  string  $batchId  set when this job was submitted as one of several sharing settings
      * @param  float|null  $duration  the recording's length in seconds, null until it has been probed
+     * @param  int|null  $framesDone  frames read so far; null when nothing is being counted
+     * @param  int|null  $framesTotal  frames to read in total
+     * @param  array<string, int>  $bySource  how many regions each layer proposed
      */
     public function __construct(
         public readonly string $jobId,
@@ -41,6 +44,9 @@ final class JobStatus
         public readonly string $videoId = '',
         public readonly string $batchId = '',
         public readonly ?float $duration = null,
+        public readonly ?int $framesDone = null,
+        public readonly ?int $framesTotal = null,
+        public readonly array $bySource = [],
         public readonly ?string $outputKey = null,
         public readonly ?string $auditKey = null,
         public readonly ?int $regions = null,
@@ -67,6 +73,12 @@ final class JobStatus
             // progress segments must be able to tell "not probed yet" from "a
             // recording of no length".
             duration: isset($data['duration']) ? (float) $data['duration'] : null,
+            // Absent while nothing is being counted, which is every stage but
+            // detection — null rather than 0, so "not counting" is not read as
+            // "none read yet".
+            framesDone: isset($data['frames_done']) ? (int) $data['frames_done'] : null,
+            framesTotal: isset($data['frames_total']) ? (int) $data['frames_total'] : null,
+            bySource: $data['by_source'] ?? [],
             outputKey: $data['output_key'] ?? null,
             auditKey: $data['audit_key'] ?? null,
             regions: isset($data['regions']) ? (int) $data['regions'] : null,
@@ -122,6 +134,9 @@ final class JobStatus
             'video_id' => $this->videoId,
             'batch_id' => $this->batchId ?: null,
             'duration' => $this->duration,
+            'frames_done' => $this->framesDone,
+            'frames_total' => $this->framesTotal,
+            'by_source' => $this->bySource ?: null,
             'output_key' => $this->outputKey,
             'audit_key' => $this->auditKey,
             'regions' => $this->regions,
