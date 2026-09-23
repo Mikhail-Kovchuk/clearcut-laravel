@@ -24,6 +24,8 @@ final class ProposedRegion
      * @param  string  $source  which layer proposed it: fixed | ocr | ai | manual
      * @param  string  $reason  what it matched: a pattern name, a label, or an AI verdict
      * @param  float|null  $t0  seconds; null on both bounds means the whole recording
+     * @param  array{x: int, y: int, w: int, h: int, t0: float|null, t1: float|null}|null  $original
+     *                                                                                             the box as detected, once a reviewer has changed it
      */
     public function __construct(
         public readonly string $name,
@@ -36,6 +38,7 @@ final class ProposedRegion
         public readonly string $reason = '',
         public readonly ?float $t0 = null,
         public readonly ?float $t1 = null,
+        public readonly ?array $original = null,
     ) {
     }
 
@@ -55,7 +58,24 @@ final class ProposedRegion
             reason: (string) ($data['reason'] ?? ''),
             t0: isset($data['t0']) ? (float) $data['t0'] : null,
             t1: isset($data['t1']) ? (float) $data['t1'] : null,
+            original: is_array($data['original'] ?? null) ? $data['original'] : null,
         );
+    }
+
+    /**
+     * Whether a reviewer reshaped or retimed a box detection proposed.
+     */
+    public function edited(): bool
+    {
+        return $this->original !== null;
+    }
+
+    /**
+     * Whether a reviewer drew this box rather than detection finding it.
+     */
+    public function drawnByReviewer(): bool
+    {
+        return $this->source === 'manual';
     }
 
     public function undecided(): bool

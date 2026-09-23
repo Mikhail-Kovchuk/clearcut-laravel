@@ -7,6 +7,7 @@ namespace App\Http\Controllers;
 use App\Models\ClearcutJob;
 use Clearcut\Video\ClearcutClient;
 use Clearcut\Video\Data\JobRequest;
+use Clearcut\Video\Data\ProposedRegion;
 use Clearcut\Video\Exceptions\ClearcutRequestException;
 use Clearcut\Video\Exceptions\ClearcutUnavailableException;
 use Illuminate\Http\JsonResponse;
@@ -266,17 +267,10 @@ class RecordingReviewController extends Controller
         return response()->json([
             'job_id' => $proposal->jobId,
             'frame' => $proposal->frame,
+            'duration' => $proposal->duration,
             'counts' => $proposal->counts(),
             'fully_reviewed' => $proposal->fullyReviewed(),
-            'regions' => array_map(static fn ($region) => [
-                'name' => $region->name,
-                'x' => $region->x, 'y' => $region->y,
-                'w' => $region->w, 'h' => $region->h,
-                't0' => $region->t0, 't1' => $region->t1,
-                'decision' => $region->decision,
-                'source' => $region->source,
-                'reason' => $region->reason,
-            ], $proposal->regions),
+            'regions' => array_map(self::regionPayload(...), $proposal->regions),
             // Surfaced, not hidden: these are regions the service could not
             // resolve and refused to guess at, so the reviewer should know
             // something on this recording is uncovered.
@@ -305,6 +299,109 @@ class RecordingReviewController extends Controller
         } catch (ClearcutRequestException $e) {
             return response()->json(['message' => $e->getMessage()], $e->status);
         }
+    }
+
+    /**
+     * Add a box the reviewer drew on the frame.
+     */
+    public function addRegion(Request $request, ClearcutJob $record): JsonResponse
+    {
+        $validated = $request->validate([
+            'x' => 'required|integer|min:0',
+            'y' => 'required|integer|min:0',
+            'w' => 'required|integer|min:1',
+            'h' => 'required|integer|min:1',
+            't0' => 'nullable|numeric|min:0',
+            't1' => 'nullable|numeric|min:0',
+        ]);
+
+        if ($record->service_analysis_id === null) {
+            return response()->json(['message' => 'No analysis was started'], 409);
+        }
+
+        try {
+            $reply = $this->clearcut->addRegion(
+                $record->service_analysis_id,
+                (int) $validated['x'], (int) $validated['y'],
+                (int) $validated['w'], (int) $validated['h'],
+                isset($validated['t0']) ? (float) $validated['t0'] : null,
+                isset($validated['t1']) ? (float) $validated['t1'] : null,
+            );
+        } catch (ClearcutRequestException $e) {
+            // 422 when the box does not fit the frame; passed through so the
+            // screen can put the drawn box back rather than show it as saved.
+            return response()->json(['message' => $e->getMessage()], $e->status);
+        }
+
+        // Record who drew it, in your own audit trail — the service's audit
+        // says a reviewer did, not which one.
+
+        return response()->json(self::regionReply($reply), 201);
+    }
+
+    /**
+     * Reshape or retime one region.
+     */
+    public function editRegion(Request $request, ClearcutJob $record): JsonResponse
+    {
+        // `sometimes`, so a field left out stays out: absence means "keep",
+        // while an explicit null time means "the whole recording".
+        $validated = $request->validate([
+            'name' => 'required|string|max:256',
+            'x' => 'sometimes|integer|min:0',
+            'y' => 'sometimes|integer|min:0',
+            'w' => 'sometimes|integer|min:1',
+            'h' => 'sometimes|integer|min:1',
+            't0' => 'sometimes|nullable|numeric|min:0',
+            't1' => 'sometimes|nullable|numeric|min:0',
+        ]);
+
+        if ($record->service_analysis_id === null) {
+            return response()->json(['message' => 'No analysis was started'], 409);
+        }
+
+        $name = $validated['name'];
+        unset($validated['name']);
+
+        try {
+            $reply = $this->clearcut->editRegion($record->service_analysis_id, $name, $validated);
+        } catch (ClearcutRequestException $e) {
+            return response()->json(['message' => $e->getMessage()], $e->status);
+        }
+
+        return response()->json(self::regionReply($reply));
+    }
+
+    /**
+     * @param  array{region: ProposedRegion, counts: array<string, int>, fully_reviewed: bool}  $reply
+     * @return array<string, mixed>
+     */
+    private static function regionReply(array $reply): array
+    {
+        return [
+            'region' => self::regionPayload($reply['region']),
+            'counts' => $reply['counts'],
+            'fully_reviewed' => $reply['fully_reviewed'],
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private static function regionPayload(ProposedRegion $region): array
+    {
+        return [
+            'name' => $region->name,
+            'x' => $region->x, 'y' => $region->y,
+            'w' => $region->w, 'h' => $region->h,
+            't0' => $region->t0, 't1' => $region->t1,
+            'decision' => $region->decision,
+            'source' => $region->source,
+            'reason' => $region->reason,
+            // The detector's box, once a reviewer has changed it — so the
+            // screen can show what was found beside what will be covered.
+            'original' => $region->original,
+        ];
     }
 
     /**

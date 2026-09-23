@@ -11,6 +11,7 @@ use Clearcut\Video\Data\Brand;
 use Clearcut\Video\Data\DetectionProfile;
 use Clearcut\Video\Data\JobRequest;
 use Clearcut\Video\Data\JobStatus;
+use Clearcut\Video\Data\ProposedRegion;
 use Clearcut\Video\Exceptions\ClearcutException;
 use Clearcut\Video\Exceptions\ClearcutRequestException;
 use Clearcut\Video\Exceptions\ClearcutUnavailableException;
@@ -199,6 +200,53 @@ class ClearcutClient
     }
 
     /**
+     * Add a box the reviewer drew. It is kept from the start.
+     *
+     * Geometry is in the proposal's frame pixels. A box outside the frame is
+     * refused with a 422 rather than trimmed to fit — the screen already keeps
+     * a drawn box inside it, so one that is not is a bug worth seeing.
+     *
+     * The transport retries, so a lost response can add the box twice. That
+     * errs towards covering more, never less, and the reviewer sees both.
+     *
+     * @return array{region: ProposedRegion, counts: array<string, int>, fully_reviewed: bool}
+     */
+    public function addRegion(
+        string $jobId,
+        int $x,
+        int $y,
+        int $w,
+        int $h,
+        ?float $t0 = null,
+        ?float $t1 = null,
+    ): array {
+        return $this->regionReply($this->send('POST', "/review/{$jobId}/regions", [
+            'x' => $x, 'y' => $y, 'w' => $w, 'h' => $h, 't0' => $t0, 't1' => $t1,
+        ]));
+    }
+
+    /**
+     * Reshape or retime one region. Its decision is left as it was.
+     *
+     * Only the keys present in `$changes` are sent, and absence is meaningful:
+     * a missing `t0` keeps the current start, while `'t0' => null` (with `t1`)
+     * means "the whole recording".
+     *
+     * @param  array{x?: int, y?: int, w?: int, h?: int, t0?: float|null, t1?: float|null}  $changes
+     * @return array{region: ProposedRegion, counts: array<string, int>, fully_reviewed: bool}
+     */
+    public function editRegion(string $jobId, string $name, array $changes): array
+    {
+        $allowed = array_intersect_key($changes, array_flip(['x', 'y', 'w', 'h', 't0', 't1']));
+
+        return $this->regionReply($this->send(
+            'PATCH',
+            "/review/{$jobId}/regions",
+            ['name' => $name] + $allowed,
+        ));
+    }
+
+    /**
      * Encode using the regions the reviewer kept.
      *
      * Undecided regions are NOT covered. The service refuses to apply a
@@ -375,6 +423,19 @@ class ClearcutClient
             $response->status(),
             $detail ? ": {$detail}" : '',
         );
+    }
+
+    /**
+     * @param  array<string, mixed>  $body
+     * @return array{region: ProposedRegion, counts: array<string, int>, fully_reviewed: bool}
+     */
+    private function regionReply(array $body): array
+    {
+        return [
+            'region' => ProposedRegion::fromArray($body['region'] ?? []),
+            'counts' => $body['counts'] ?? [],
+            'fully_reviewed' => (bool) ($body['fully_reviewed'] ?? false),
+        ];
     }
 
     private function url(string $path): string

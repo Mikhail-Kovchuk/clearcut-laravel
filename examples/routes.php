@@ -52,6 +52,12 @@ Route::middleware(['auth:sanctum'])
             // closing the tab.
             Route::patch('decisions', [RecordingReviewController::class, 'decide']);
 
+            // A box the reviewer drew, and changes to any box's shape or time.
+            // The region's name goes in the body: detector names carry spaces
+            // and colons.
+            Route::post('regions', [RecordingReviewController::class, 'addRegion']);
+            Route::patch('regions', [RecordingReviewController::class, 'editRegion']);
+
             // Encode what was kept. Refused with 409 while regions are still
             // undecided, because those would not be covered.
             Route::post('apply', [RecordingReviewController::class, 'apply']);

@@ -19,6 +19,7 @@ final class AnalysisProposal
      * @param  array<int, ProposedRegion>  $regions
      * @param  array<int, array<string, mixed>>  $rejected  proposed but outside the frame
      * @param  array{width: int, height: int}  $frame  the geometry regions are measured in
+     * @param  float  $duration  seconds; 0 for a proposal older than this field
      */
     public function __construct(
         public readonly string $jobId,
@@ -29,6 +30,7 @@ final class AnalysisProposal
         public readonly array $rejected = [],
         public readonly string $mode = 'auto',
         public readonly string $profile = 'balanced',
+        public readonly float $duration = 0.0,
     ) {
     }
 
@@ -46,6 +48,7 @@ final class AnalysisProposal
             rejected: $data['rejected'] ?? [],
             mode: (string) ($data['mode'] ?? 'auto'),
             profile: (string) ($data['profile'] ?? 'balanced'),
+            duration: (float) ($data['duration'] ?? 0.0),
         );
     }
 

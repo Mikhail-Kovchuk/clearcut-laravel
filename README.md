@@ -129,8 +129,16 @@ $proposal = $this->clearcut->proposal($analysis->jobId);
 
 $this->clearcut->decide($analysis->jobId, ['pan-0' => 'kept']);
 
+// Correct a box, or draw one detection missed. Both return the region as saved.
+$this->clearcut->editRegion($analysis->jobId, 'pan-0', ['w' => 240, 't1' => 12.5]);
+$this->clearcut->addRegion($analysis->jobId, x: 40, y: 300, w: 200, h: 36, t0: 4.0, t1: 9.0);
+
 $encode = $this->clearcut->apply($analysis->jobId, brand: 'acme');
 ```
+
+`editRegion()` sends only the keys it is given: a missing `t0` keeps the
+current start, while `'t0' => null, 't1' => null` means the whole recording.
+A box that does not fit the frame is refused with 422, never trimmed.
 
 **Regions arrive undecided, and only kept ones are covered.** Applying a
 half-reviewed proposal is refused with 409 unless `allowUndecided: true` —
