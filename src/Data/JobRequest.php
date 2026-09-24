@@ -36,6 +36,13 @@ final class JobRequest
 
     public const MARK_NONE = 'none';
 
+    /** The size the PHP watermark service draws, and the default. */
+    public const SIZE_LARGE = 'large';
+
+    public const SIZE_MEDIUM = 'medium';
+
+    public const SIZE_SMALL = 'small';
+
     /** The video and its audit become objects in the bucket. */
     public const OUTPUT_S3 = 's3';
 
@@ -54,6 +61,7 @@ final class JobRequest
      * @param  array<string, mixed>  $profileOverrides  individual profile fields to override
      * @param  array<int, array<string, mixed>>  $regions  reviewed regions; when present, detection is skipped
      * @param  string|null  $outputDestination  s3 | local; null leaves it to the service's default
+     * @param  string  $markSize  large | medium | small — the logo or text, not the frame
      */
     public function __construct(
         public readonly string $videoId,
@@ -68,6 +76,7 @@ final class JobRequest
         public readonly array $regions = [],
         public readonly bool $reviewedByHuman = false,
         public readonly ?string $outputDestination = null,
+        public readonly string $markSize = self::SIZE_LARGE,
     ) {
         if ($videoId === '' || $sourceKey === '') {
             throw new InvalidArgumentException('videoId and sourceKey are required');
@@ -79,6 +88,10 @@ final class JobRequest
 
         // The service refuses these too, but failing here names the caller's
         // own line rather than a rejected HTTP request.
+        if (! in_array($markSize, [self::SIZE_LARGE, self::SIZE_MEDIUM, self::SIZE_SMALL], true)) {
+            throw new InvalidArgumentException("Unknown mark size: {$markSize}");
+        }
+
         if (! in_array($mode, [self::MODE_NONE, self::MODE_FIXED, self::MODE_AUTO, self::MODE_AI], true)) {
             throw new InvalidArgumentException("Unknown mode: {$mode}");
         }
@@ -110,6 +123,7 @@ final class JobRequest
             'redaction_style' => $this->redactionStyle,
             'partner' => $this->brand,
             'mark_type' => $this->markType,
+            'mark_size' => $this->markSize,
             'fixed_preset' => $this->fixedPreset,
             'profile' => $this->profile,
             'reviewed_by_human' => $this->reviewedByHuman,

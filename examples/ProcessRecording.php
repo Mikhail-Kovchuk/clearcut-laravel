@@ -64,6 +64,7 @@ class ProcessRecording implements ShouldQueue
         public readonly int $clearcutJobId,
         public readonly string $mode = JobRequest::MODE_AUTO,
         public readonly string $brand = '',
+        public readonly string $markSize = JobRequest::SIZE_LARGE,
     ) {
     }
 
@@ -93,6 +94,7 @@ class ProcessRecording implements ShouldQueue
                 mode: $this->mode,
                 brand: $this->brand,
                 markType: $this->brand === '' ? JobRequest::MARK_NONE : JobRequest::MARK_LOGO,
+                markSize: $this->markSize,
             ));
 
             $record->update(['service_job_id' => $status->jobId, 'state' => $status->state]);

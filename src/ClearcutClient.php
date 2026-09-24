@@ -262,11 +262,13 @@ class ClearcutClient
         string $markType = 'logo',
         bool $allowUndecided = false,
         ?string $outputDestination = null,
+        string $markSize = 'large',
     ): JobStatus {
         $payload = [
             'redaction_style' => $redactionStyle,
             'partner' => $brand,
             'mark_type' => $markType,
+            'mark_size' => $markSize,
             'allow_undecided' => $allowUndecided,
         ];
         if ($outputDestination !== null) {

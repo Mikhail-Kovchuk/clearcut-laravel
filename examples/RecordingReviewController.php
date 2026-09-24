@@ -435,6 +435,7 @@ class RecordingReviewController extends Controller
             'redaction_style' => 'required|in:blur,solid,pixelate',
             'brand' => 'nullable|string|max:64',
             'mark_type' => 'required|in:logo,text,none',
+            'mark_size' => 'nullable|in:large,medium,small',
             'allow_undecided' => 'boolean',
             // "local" writes nothing to S3; see output() below.
             'output_destination' => 'nullable|in:s3,local',
@@ -452,6 +453,7 @@ class RecordingReviewController extends Controller
                 markType: $validated['mark_type'],
                 allowUndecided: (bool) ($validated['allow_undecided'] ?? false),
                 outputDestination: $validated['output_destination'] ?? null,
+                markSize: $validated['mark_size'] ?? 'large',
             );
         } catch (ClearcutRequestException $e) {
             // A 409 means regions are still undecided and would not be
