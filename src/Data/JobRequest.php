@@ -36,6 +36,15 @@ final class JobRequest
 
     public const MARK_NONE = 'none';
 
+    /** The video and its audit become objects in the bucket. */
+    public const OUTPUT_S3 = 's3';
+
+    /**
+     * Nothing is written to S3: the video and its audit wait on the service
+     * until they are streamed to the reviewer's browser, then are deleted there.
+     */
+    public const OUTPUT_LOCAL = 'local';
+
     /**
      * @param  string  $videoId  the caller's own identifier; appears in output keys and the audit file
      * @param  string  $sourceKey  a key in the service's bucket, NOT a URL
@@ -44,6 +53,7 @@ final class JobRequest
      * @param  string  $profile  detection speed against thoroughness
      * @param  array<string, mixed>  $profileOverrides  individual profile fields to override
      * @param  array<int, array<string, mixed>>  $regions  reviewed regions; when present, detection is skipped
+     * @param  string|null  $outputDestination  s3 | local; null leaves it to the service's default
      */
     public function __construct(
         public readonly string $videoId,
@@ -57,9 +67,14 @@ final class JobRequest
         public readonly array $profileOverrides = [],
         public readonly array $regions = [],
         public readonly bool $reviewedByHuman = false,
+        public readonly ?string $outputDestination = null,
     ) {
         if ($videoId === '' || $sourceKey === '') {
             throw new InvalidArgumentException('videoId and sourceKey are required');
+        }
+
+        if ($outputDestination !== null && ! in_array($outputDestination, [self::OUTPUT_S3, self::OUTPUT_LOCAL], true)) {
+            throw new InvalidArgumentException("Unknown output destination: {$outputDestination}");
         }
 
         // The service refuses these too, but failing here names the caller's
@@ -102,6 +117,10 @@ final class JobRequest
 
         if ($this->regions !== []) {
             $payload['regions'] = $this->regions;
+        }
+
+        if ($this->outputDestination !== null) {
+            $payload['output_destination'] = $this->outputDestination;
         }
 
         // Overrides are merged at the top level, and only the keys actually

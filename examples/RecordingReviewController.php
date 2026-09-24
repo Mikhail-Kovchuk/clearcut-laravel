@@ -64,6 +64,10 @@ class RecordingReviewController extends Controller
                     'name' => $profile->name,
                     'sample_fps' => $profile->sampleFps,
                 ], $this->clearcut->profiles()),
+
+                // Where a finished video goes by default, and how long a local
+                // one waits on the service for its download.
+                'output' => $this->clearcut->settings(),
             ]);
         } catch (ClearcutUnavailableException $e) {
             // 503, not 500: the panel should say "try again", not "something
@@ -179,6 +183,24 @@ class RecordingReviewController extends Controller
                 return response()->json($record->only([
                     'state', 'stage', 'progress', 'output_key', 'audit_key', 'error',
                 ]));
+            }
+
+            // Unknown to the service while this row still says it runs: the
+            // service restarted or was stopped mid-job, and its registry lives
+            // in memory. Nothing will ever finish this row, so it is failed
+            // here and its claim released — left as it was, it stays "running"
+            // for ever and the panel keeps offering to go back to it.
+            if ($e->isNotFound()) {
+                $record->update([
+                    'state' => 'failed',
+                    'stage' => 'failed',
+                    'error' => 'The service no longer knows this job: it restarted '
+                        .'or was stopped while the job ran. Start it again.',
+                    'claimed_at' => null,
+                    'finished_at' => now(),
+                ]);
+
+                return response()->json($record->only(['state', 'stage', 'progress', 'error']));
             }
 
             return response()->json(['message' => $e->getMessage()], $e->status);
@@ -414,6 +436,8 @@ class RecordingReviewController extends Controller
             'brand' => 'nullable|string|max:64',
             'mark_type' => 'required|in:logo,text,none',
             'allow_undecided' => 'boolean',
+            // "local" writes nothing to S3; see output() below.
+            'output_destination' => 'nullable|in:s3,local',
         ]);
 
         if ($record->service_analysis_id === null) {
@@ -427,6 +451,7 @@ class RecordingReviewController extends Controller
                 brand: $validated['brand'] ?? '',
                 markType: $validated['mark_type'],
                 allowUndecided: (bool) ($validated['allow_undecided'] ?? false),
+                outputDestination: $validated['output_destination'] ?? null,
             );
         } catch (ClearcutRequestException $e) {
             // A 409 means regions are still undecided and would not be
@@ -442,5 +467,88 @@ class RecordingReviewController extends Controller
         ]);
 
         return response()->json($status->toArray(), 202);
+    }
+
+    /**
+     * A finished local output, streamed from the service to the browser.
+     *
+     * Local outputs are never in S3: the service holds the file until it is
+     * released, and this is the only way to it — the browser cannot reach the
+     * service (rule 6). Streamed through rather than buffered, since a
+     * recording is hundreds of megabytes.
+     */
+    public function output(ClearcutJob $record): mixed
+    {
+        if ($record->service_job_id === null) {
+            return response()->json(['message' => 'Nothing was encoded for this job'], 409);
+        }
+
+        try {
+            $output = $this->clearcut->streamOutput($record->service_job_id);
+        } catch (ClearcutRequestException $e) {
+            return response()->json(['message' => $e->getMessage()], $e->status);
+        } catch (ClearcutUnavailableException $e) {
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
+
+        return response()->stream(function () use ($output) {
+            $stream = $output['stream'];
+            while (! $stream->eof()) {
+                echo $stream->read(256 * 1024);
+                flush();
+            }
+        }, 200, [
+            'Content-Type' => 'video/mp4',
+            // Length and checksum are what let the browser confirm a complete
+            // save before it asks for the release.
+            'Content-Length' => (string) $output['size'],
+            'X-Content-SHA256' => $output['sha256'],
+            // Name it after your own record rather than the service's id, so
+            // the file on the reviewer's disk says what it is.
+            'Content-Disposition' => 'attachment; filename="'.$output['filename'].'"',
+            'Cache-Control' => 'no-store',
+        ]);
+    }
+
+    /**
+     * The audit file for a local output, saved beside the video.
+     */
+    public function outputAudit(ClearcutJob $record): JsonResponse
+    {
+        if ($record->service_job_id === null) {
+            return response()->json(['message' => 'Nothing was encoded for this job'], 409);
+        }
+
+        try {
+            return response()->json($this->clearcut->outputAudit($record->service_job_id));
+        } catch (ClearcutRequestException $e) {
+            return response()->json(['message' => $e->getMessage()], $e->status);
+        } catch (ClearcutUnavailableException $e) {
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
+    }
+
+    /**
+     * Delete a local output on the service once the browser has saved it.
+     *
+     * Irreversible — the service holds the only copy — which is why the panel
+     * calls this only after the file is written and its size matched.
+     */
+    public function releaseOutput(ClearcutJob $record): JsonResponse
+    {
+        if ($record->service_job_id === null) {
+            return response()->json(['message' => 'Nothing was encoded for this job'], 409);
+        }
+
+        try {
+            $released = $this->clearcut->releaseOutput($record->service_job_id);
+        } catch (ClearcutUnavailableException $e) {
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
+
+        // Record who saved it, in your own audit trail: the service knows only
+        // that a release was asked for.
+
+        return response()->json(['released' => $released]);
     }
 }

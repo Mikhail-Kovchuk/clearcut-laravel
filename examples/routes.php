@@ -58,6 +58,13 @@ Route::middleware(['auth:sanctum'])
             Route::post('regions', [RecordingReviewController::class, 'addRegion']);
             Route::patch('regions', [RecordingReviewController::class, 'editRegion']);
 
+            // A local output (output_destination "local"): nothing of it is in
+            // S3. The video and its audit are streamed from the service, and
+            // released there once the browser has saved them.
+            Route::get('output', [RecordingReviewController::class, 'output']);
+            Route::get('output/audit', [RecordingReviewController::class, 'outputAudit']);
+            Route::delete('output', [RecordingReviewController::class, 'releaseOutput']);
+
             // Encode what was kept. Refused with 409 while regions are still
             // undecided, because those would not be covered.
             Route::post('apply', [RecordingReviewController::class, 'apply']);

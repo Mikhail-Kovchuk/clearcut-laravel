@@ -18,6 +18,7 @@ use Clearcut\Video\Exceptions\ClearcutUnavailableException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Client\Response;
+use Psr\Http\Message\StreamInterface;
 
 /**
  * HTTP client for a clearcut-video service.
@@ -260,15 +261,19 @@ class ClearcutClient
         string $brand = '',
         string $markType = 'logo',
         bool $allowUndecided = false,
+        ?string $outputDestination = null,
     ): JobStatus {
-        return JobStatus::fromArray(
-            $this->send('POST', "/review/{$jobId}/apply", [
-                'redaction_style' => $redactionStyle,
-                'partner' => $brand,
-                'mark_type' => $markType,
-                'allow_undecided' => $allowUndecided,
-            ])
-        );
+        $payload = [
+            'redaction_style' => $redactionStyle,
+            'partner' => $brand,
+            'mark_type' => $markType,
+            'allow_undecided' => $allowUndecided,
+        ];
+        if ($outputDestination !== null) {
+            $payload['output_destination'] = $outputDestination;
+        }
+
+        return JobStatus::fromArray($this->send('POST', "/review/{$jobId}/apply", $payload));
     }
 
     /**
@@ -277,6 +282,94 @@ class ClearcutClient
     public function discardProposal(string $jobId): void
     {
         $this->send('DELETE', "/review/{$jobId}");
+    }
+
+    /**
+     * What a settings form needs to offer the output choice.
+     *
+     * @return array{output_destination: string, output_retention_seconds: int}
+     */
+    public function settings(): array
+    {
+        return $this->send('GET', '/settings');
+    }
+
+    /**
+     * A local output, as a stream to pass on to the browser.
+     *
+     * Only for jobs whose output destination is local: those write nothing to
+     * S3, and the service holds the file until it is released. Streamed rather
+     * than read into memory — a recording is hundreds of megabytes.
+     *
+     * The size and checksum come with it so the caller can let the browser
+     * confirm a complete save before anything is released.
+     *
+     * @return array{stream: StreamInterface, size: int, sha256: string, filename: string}
+     */
+    public function streamOutput(string $jobId, int $timeout = 600): array
+    {
+        $path = "/jobs/{$jobId}/output";
+        try {
+            $response = $this->http
+                ->withToken($this->token)
+                ->timeout($timeout)
+                ->withOptions(['stream' => true])
+                ->get($this->url($path));
+        } catch (ConnectionException $e) {
+            throw new ClearcutUnavailableException(
+                "clearcut-video is unreachable at {$this->baseUrl}: {$e->getMessage()}",
+                previous: $e,
+            );
+        }
+
+        if ($response->failed()) {
+            throw new ClearcutRequestException(
+                $this->describeFailure($response, 'GET', $path),
+                $response->status(),
+                $response->json() ?? [],
+            );
+        }
+
+        preg_match('/filename="?([^";]+)"?/', $response->header('Content-Disposition'), $name);
+
+        return [
+            'stream' => $response->toPsrResponse()->getBody(),
+            'size' => (int) $response->header('Content-Length'),
+            'sha256' => $response->header('X-Content-SHA256'),
+            'filename' => $name[1] ?? "{$jobId}.mp4",
+        ];
+    }
+
+    /**
+     * The audit file that belongs with a local output, for saving beside it.
+     *
+     * @return array<string, mixed>
+     */
+    public function outputAudit(string $jobId): array
+    {
+        return $this->send('GET', "/jobs/{$jobId}/output/audit");
+    }
+
+    /**
+     * Delete a local output once it is safely on the reviewer's machine.
+     *
+     * Irreversible — the service holds the only copy — so call it only after
+     * the browser has written the file and its size matched. False if there
+     * was nothing held any more.
+     */
+    public function releaseOutput(string $jobId): bool
+    {
+        try {
+            $this->send('DELETE', "/jobs/{$jobId}/output");
+
+            return true;
+        } catch (ClearcutRequestException $e) {
+            if ($e->isNotFound()) {
+                return false;
+            }
+
+            throw $e;
+        }
     }
 
     /**

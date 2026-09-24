@@ -34,6 +34,9 @@ final class JobStatus
      * @param  int|null  $framesDone  frames read so far; null when nothing is being counted
      * @param  int|null  $framesTotal  frames to read in total
      * @param  array<string, int>  $bySource  how many regions each layer proposed
+     * @param  string|null  $outputDestination  'local' when the output waits on the service for download
+     * @param  int|null  $outputSize  bytes of a local output
+     * @param  int|null  $outputExpiresAt  unix time a local output is deleted if nobody fetches it
      */
     public function __construct(
         public readonly string $jobId,
@@ -53,6 +56,9 @@ final class JobStatus
         public readonly int $rejectedRegions = 0,
         public readonly ?array $frame = null,
         public readonly ?string $error = null,
+        public readonly ?string $outputDestination = null,
+        public readonly ?int $outputSize = null,
+        public readonly ?int $outputExpiresAt = null,
     ) {
     }
 
@@ -85,7 +91,19 @@ final class JobStatus
             rejectedRegions: (int) ($data['rejected_regions'] ?? 0),
             frame: $data['frame'] ?? null,
             error: $data['error'] ?? null,
+            outputDestination: $data['output_destination'] ?? null,
+            outputSize: isset($data['output_size']) ? (int) $data['output_size'] : null,
+            outputExpiresAt: isset($data['output_expires_at']) ? (int) $data['output_expires_at'] : null,
         );
+    }
+
+    /**
+     * Whether a finished output waits on the service for download rather than
+     * sitting in S3. Fetch it with ClearcutClient::streamOutput().
+     */
+    public function outputIsLocal(): bool
+    {
+        return $this->outputDestination === JobRequest::OUTPUT_LOCAL;
     }
 
     public function finished(): bool
@@ -143,6 +161,9 @@ final class JobStatus
             'rejected_regions' => $this->rejectedRegions ?: null,
             'frame' => $this->frame,
             'error' => $this->error,
+            'output_destination' => $this->outputDestination,
+            'output_size' => $this->outputSize,
+            'output_expires_at' => $this->outputExpiresAt,
         ], static fn ($value) => $value !== null);
     }
 }
