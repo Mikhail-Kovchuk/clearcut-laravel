@@ -423,6 +423,9 @@ class RecordingReviewController extends Controller
             // The detector's box, once a reviewer has changed it — so the
             // screen can show what was found beside what will be covered.
             'original' => $region->original,
+            // A field that scrolled is drawn as these; the box above is only
+            // their outline, and drawing it shows far more than is covered.
+            'segments' => $region->segments,
         ];
     }
 

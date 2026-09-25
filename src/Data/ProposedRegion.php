@@ -26,6 +26,9 @@ final class ProposedRegion
      * @param  float|null  $t0  seconds; null on both bounds means the whole recording
      * @param  array{x: int, y: int, w: int, h: int, t0: float|null, t1: float|null}|null  $original
      *                                                                                             the box as detected, once a reviewer has changed it
+     * @param  list<array{x: int, y: int, w: int, h: int, t0: float, t1: float}>  $segments
+     *                                                                                             where a field that scrolled was over each stretch of
+     *                                                                                             time; x/y/w/h are then only their outline
      */
     public function __construct(
         public readonly string $name,
@@ -39,6 +42,7 @@ final class ProposedRegion
         public readonly ?float $t0 = null,
         public readonly ?float $t1 = null,
         public readonly ?array $original = null,
+        public readonly array $segments = [],
     ) {
     }
 
@@ -59,6 +63,14 @@ final class ProposedRegion
             t0: isset($data['t0']) ? (float) $data['t0'] : null,
             t1: isset($data['t1']) ? (float) $data['t1'] : null,
             original: is_array($data['original'] ?? null) ? $data['original'] : null,
+            segments: array_values(array_map(
+                static fn (array $s): array => [
+                    'x' => (int) $s['x'], 'y' => (int) $s['y'],
+                    'w' => (int) $s['w'], 'h' => (int) $s['h'],
+                    't0' => (float) $s['t0'], 't1' => (float) $s['t1'],
+                ],
+                array_filter($data['segments'] ?? [], 'is_array'),
+            )),
         );
     }
 
@@ -76,6 +88,18 @@ final class ProposedRegion
     public function drawnByReviewer(): bool
     {
         return $this->source === 'manual';
+    }
+
+    /**
+     * Whether the field moved — scrolled with its page — while it was covered.
+     *
+     * Such a region is drawn as its segments. Its x/y/w/h span every position
+     * the field took, so a screen drawing that outline shows a box far larger
+     * than anything that is covered.
+     */
+    public function moves(): bool
+    {
+        return $this->segments !== [];
     }
 
     public function undecided(): bool
