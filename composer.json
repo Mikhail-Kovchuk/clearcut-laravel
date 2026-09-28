@@ -1,10 +1,9 @@
 {
-    "name": "clearcut/video-client",
+    "name": "clearcut/clearcut-laravel",
     "description": "Laravel client for a clearcut-video service: watermarking and PII redaction for screen recordings",
     "type": "library",
-    "license": "proprietary",
-    "//": "Declared explicitly because this is installed from a path repository. Without it composer infers dev-master, which a project with the default minimum-stability=stable then refuses to install. Bump it when the service's contract changes.",
-    "version": "1.0.0",
+    "license": "MIT",
+    "//": "No version field: installed from the clearcut-laravel mirror, where the git tag is the version. A field here that disagreed with the tag would make composer skip that release with only a warning.",
     "require": {
         "php": "^8.2",
         "illuminate/http": "^11.0|^12.0",

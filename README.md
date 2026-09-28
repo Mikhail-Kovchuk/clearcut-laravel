@@ -1,7 +1,11 @@
-# clearcut/video-client
+# clearcut/clearcut-laravel
 
-Laravel client for a [clearcut-video](../README.md) service — watermarking and
-PII redaction for screen recordings.
+Laravel client for a clearcut-video service — watermarking and PII redaction
+for screen recordings.
+
+> **This repository is a read-only mirror.** It is published from the
+> `laravel/` folder of clearcut-video on every release tag, and each sync
+> replaces what is here. Changes go to clearcut-video.
 
 ## What is and is not in here
 
@@ -15,56 +19,153 @@ they do beyond calling the client is bound to one application's schema. A
 package that guessed at your claim columns would be harder to use than writing
 eighty lines yourself.
 
-They reference nothing an application might not have. The migration creates a
-standalone table with a polymorphic `subject`, so it attaches to whatever holds
-recordings without knowing what that is — copied into a fresh Laravel install,
-they migrate and run as they stand.
+The migration creates a standalone table with a polymorphic `subject`, so it
+attaches to whatever holds recordings without knowing what that is. The
+controller is the one place that has to know: it looks a recording up to find
+its key in the bucket, and that lookup is yours to write — step 4 below.
 
 That split is the whole design. The reusable part is genuinely reusable
 because it refuses to know anything about you.
 
 ## Install
 
-While this lives inside the service's repository, point composer at the path:
+### Requirements
+
+- PHP 8.2+ and Laravel 11 or 12. Nothing else is installed: the package needs
+  only what the framework already ships, Guzzle included.
+- A running clearcut-video service this server can reach, and its token. The
+  service reads and writes the bucket itself; this side passes object keys and
+  needs no S3 driver for it.
+
+### 1. The package
+
+Not on Packagist. Point composer at the mirror:
 
 ```json
 {
     "repositories": [
-        { "type": "path", "url": "../clearcut-video/laravel", "options": { "symlink": false } }
+        { "type": "vcs", "url": "https://github.com/Mikhail-Kovchuk/clearcut-laravel" }
     ]
 }
 ```
 
 ```bash
-composer require clearcut/video-client:^1.0
+composer require clearcut/clearcut-laravel:^1.0
 php artisan vendor:publish --tag=clearcut-config   # optional; defaults work
 ```
 
-The version constraint is not optional. A path repository with no git tag
-resolves to `dev-master`, which a project on the default
-`minimum-stability: stable` refuses — hence the explicit `version` in this
-package's own `composer.json`.
+The service provider registers itself.
 
-Laravel 12 ships without `routes/api.php`. Run `php artisan install:api`, then
-add the routes from `examples/routes.php` — their paths match what the React
-package's adapter calls, so changing one means changing the other.
+The version is the git tag, shared with the service: the client at `v1.4.0`
+speaks the contract of the service at `v1.4.0`. `^1.0` takes fixes and new
+endpoints; a `2.0` means the contract changed and is taken only on purpose.
 
-Verified end to end in a clean Laravel 12 install on PHP 8.2, against a real
-service and a real S3 bucket: analyse, review, apply, encode. The result landed
-beside an untouched original with an audit file recording both hashes.
-
-`videoUrl()` is a stub returning 501 — it has to be written against whatever
-disk holds your recordings. The review screen works without it, listing regions
-rather than showing them over the video.
+### 2. The connection
 
 ```dotenv
-CLEARCUT_URL=http://10.8.0.2:8000
+CLEARCUT_URL=http://clearcut.internal:8000
 CLEARCUT_TOKEN=the-same-token-the-service-has
 ```
+
+| Variable | Default | What it is |
+|---|---|---|
+| `CLEARCUT_URL` | `http://127.0.0.1:8000` | where the service listens |
+| `CLEARCUT_TOKEN` | — | the service's `CLEARCUT_AUTH_TOKEN`; required |
+| `CLEARCUT_TIMEOUT` | `30` | seconds per HTTP request, not per job |
+| `CLEARCUT_RETRIES` | `2` | retries when the service cannot be reached |
+| `CLEARCUT_POLL_INTERVAL` | `10` | seconds between polls, queued job only |
+| `CLEARCUT_MAX_JOB_SECONDS` | `3600` | when the queued job gives up waiting |
 
 The service must not be reachable from the internet. It holds storage
 credentials and processes recordings full of personal data, and the token is
 the only thing in front of it.
+
+Check it from this server:
+
+```bash
+php artisan tinker --execute="dump(app(Clearcut\Video\ClearcutClient::class)->health());"
+php artisan tinker --execute="dump(app(Clearcut\Video\ClearcutClient::class)->brands());"
+```
+
+The first says whether the service is reachable and which binaries it found;
+`reachable: false` carries the reason. It does not check the token — `/health`
+is open, so a readiness probe needs no credentials. The second does: a wrong
+token throws `ClearcutRequestException` with status 401.
+
+### 3. The table
+
+Copy two files and migrate:
+
+| From `examples/` | To |
+|---|---|
+| `migration_create_clearcut_jobs_table.php` | `database/migrations/<timestamp>_create_clearcut_jobs_table.php` |
+| `ClearcutJob.php` | `app/Models/ClearcutJob.php` |
+
+```bash
+php artisan migrate
+```
+
+The table is where results are remembered. The service keeps jobs in memory
+and forgets them on restart, and it never overwrites an original — so this
+row is the only record of where the output and its audit file went.
+
+### 4. The controller and routes
+
+| From `examples/` | To |
+|---|---|
+| `RecordingReviewController.php` | `app/Http/Controllers/` |
+| `routes.php` | into `routes/api.php`, or whichever file carries your API routes |
+
+Their paths match what the React package's adapter calls, so changing one
+means changing the other. Laravel 12 ships without `routes/api.php`;
+`php artisan install:api` creates it, and installs Sanctum with it.
+
+Then adapt these — the controller does not run until the first two are done:
+
+- **The recording model.** `App\Models\Recording`, and `exists:recordings,id`
+  in the validation rules, stand for whatever holds your recordings. It must
+  give the recording's object key in the service's bucket as `source_key`:
+  the key comes from a row, never from the request.
+- **Authentication and permission.** `auth:sanctum` and `can:process-recordings`
+  are placeholders. Replace them with your own guard and permission
+  middleware. As shipped, `can:` denies until that ability is defined, so a
+  copy fails closed with 403 rather than open.
+- **Ownership.** A route id is a claim, not a fact. If not every permitted user
+  may see every recording, check a policy on the recording in each action, or
+  anyone can reach anyone's recording by changing a number.
+- **`videoUrl()`** is a stub returning 501. Write it against the disk that holds
+  your recordings. The review screen works without it, listing regions rather
+  than drawing them over the video.
+
+### 5. Optional: processing without the UI
+
+`examples/ProcessRecording.php` is a queued job for a pipeline with nobody
+watching — it starts a job, polls it and records the result. The controller
+does not use it: with the React screen, the browser polls through the
+controller. Copy it into `app/Jobs/` only if something dispatches work
+automatically, and then:
+
+- run a queue worker (`php artisan queue:work`, under supervisor or systemd);
+- set the queue connection's `retry_after` above the job's `$timeout` (7200 s).
+  Otherwise the queue decides a long encode has died and starts it a second
+  time while the first is still running.
+
+### Verified
+
+End to end in a clean Laravel 12 install on PHP 8.2, against a real service
+and a real S3 bucket: analyse, review, apply, encode. The result landed beside
+an untouched original with an audit file recording both hashes.
+
+### Developing the package
+
+Alongside an application, from a checkout of clearcut-video, use a path
+repository instead of the mirror — with an explicit version, because a path
+has no tag and composer would otherwise call it `dev-main`, which the default
+`minimum-stability: stable` refuses:
+
+```json
+{ "type": "path", "url": "../clearcut-video/laravel", "options": { "symlink": false, "versions": { "clearcut/clearcut-laravel": "1.99.0" } } }
+```
 
 ## Use
 

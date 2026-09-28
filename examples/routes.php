@@ -10,10 +10,11 @@
  * calls. Change one and change the other, or the adapter will 404 against a
  * working backend and look like the service is down.
  *
- * Every route is behind authentication AND a permission: `can:process-recordings`
- * here, which denies until the application defines that ability — so a copy
- * of this file fails closed, with a 403, rather than open. In psm-admin use its
- * own `permission:` middleware instead.
+ * Every route is behind authentication AND a permission: `auth:sanctum` and
+ * `can:process-recordings` here, the second of which denies until the
+ * application defines that ability — so a copy of this file fails closed, with
+ * a 403, rather than open. In an application with its own guard and
+ * permission middleware (JWT and `permission:`, say), use those instead.
  *
  * That is not the whole check. An id in a URL is a claim, not a fact: this
  * controller does not verify that the user may see THAT recording, and an

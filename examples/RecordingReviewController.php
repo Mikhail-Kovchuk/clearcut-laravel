@@ -31,8 +31,9 @@ use Illuminate\Http\Request;
  *     number.
  *   - **Audit.** Who asked for what, in the application's own trail.
  *
- * It works against `ClearcutJob` and its standalone table so it runs in a
- * fresh Laravel install with nothing else present.
+ * It works against `ClearcutJob` and its standalone table. The one thing it
+ * needs from the application is `Recording` — the row that knows a
+ * recording's key in the bucket. Swap in whatever yours is called.
  */
 class RecordingReviewController extends Controller
 {
