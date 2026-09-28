@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Clearcut\Video;
 
+use Clearcut\Video\Console\InstallCommand;
 use Clearcut\Video\Exceptions\ClearcutException;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Support\ServiceProvider;
 
 /**
- * Registers the client as a singleton and publishes the config.
+ * Registers the client as a singleton, publishes the config and the examples,
+ * and registers `clearcut:install`, which publishes them all in one go.
  *
  * The provider is the ONLY part of this package that knows it is running in
  * Laravel; `ClearcutClient` takes an HTTP factory and plain strings, so it can
@@ -55,6 +57,40 @@ class ClearcutServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../config/clearcut.php' => config_path('clearcut.php'),
             ], 'clearcut-config');
+
+            // Published, never loaded from vendor/: the table is the
+            // application's to change, and a migration that runs from here
+            // would change under it on the next composer update. The date in
+            // the name is replaced with the moment of publishing where the
+            // application has database.migrations.update_date_on_publish on,
+            // as new installs do; otherwise it stands, and still orders after
+            // the framework's own tables.
+            $this->publishesMigrations([
+                __DIR__.'/../examples/migration_create_clearcut_jobs_table.php' => database_path('migrations/2026_01_01_000000_create_clearcut_jobs_table.php'),
+            ], 'clearcut-migrations');
+
+            // The rest of the examples, same reasoning: once published they are
+            // application code, and each has lines to adapt before it runs.
+            $this->publishes([
+                __DIR__.'/../examples/ClearcutJob.php' => app_path('Models/ClearcutJob.php'),
+            ], 'clearcut-models');
+
+            $this->publishes([
+                __DIR__.'/../examples/RecordingReviewController.php' => app_path('Http/Controllers/RecordingReviewController.php'),
+            ], 'clearcut-controllers');
+
+            // A file of its own rather than lines pasted into routes/api.php,
+            // so the application's routes and these stay apart and the `use`
+            // lines cannot collide.
+            $this->publishes([
+                __DIR__.'/../examples/routes.php' => base_path('routes/clearcut.php'),
+            ], 'clearcut-routes');
+
+            $this->publishes([
+                __DIR__.'/../examples/ProcessRecording.php' => app_path('Jobs/ProcessRecording.php'),
+            ], 'clearcut-jobs');
+
+            $this->commands([InstallCommand::class]);
         }
     }
 

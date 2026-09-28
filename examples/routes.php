@@ -1,10 +1,13 @@
 <?php
 
 /**
- * EXAMPLE — add these to routes/api.php and adapt.
+ * EXAMPLE — published as routes/clearcut.php, and adapt.
  *
- * Laravel 12 ships without routes/api.php; run `php artisan install:api` to
- * create it, or add these to whichever file already carries your API routes.
+ *   php artisan clearcut:install     (or vendor:publish --tag=clearcut-routes)
+ *
+ * Loaded from routes/api.php with `require __DIR__.'/clearcut.php';`, which
+ * clearcut:install adds, so the paths sit under /api. Laravel 12 ships
+ * without routes/api.php; `php artisan install:api` creates it.
  *
  * The paths match what `examples/createClearcutApi.ts` in the React package
  * calls. Change one and change the other, or the adapter will 404 against a

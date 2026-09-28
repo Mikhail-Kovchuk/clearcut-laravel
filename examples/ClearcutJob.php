@@ -9,7 +9,9 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
 
 /**
- * EXAMPLE — copy into app/Models/ and adapt.
+ * EXAMPLE — publish into app/Models/ and adapt:
+ *
+ *   php artisan vendor:publish --tag=clearcut-models
  *
  * Tracks one processing run against the table `migration_create_clearcut_jobs_table.php`
  * creates. Nothing here references an application's own models: `subject` is a

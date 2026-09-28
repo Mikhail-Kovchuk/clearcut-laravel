@@ -1,7 +1,9 @@
 <?php
 
 /**
- * EXAMPLE — copy into database/migrations/ and adapt.
+ * EXAMPLE — publish into database/migrations/ and adapt:
+ *
+ *   php artisan vendor:publish --tag=clearcut-migrations
  *
  * A standalone table, referencing nothing. `subject_type` / `subject_id` name
  * whatever the application calls a recording, so this does not assume the

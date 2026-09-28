@@ -37,28 +37,55 @@ because it refuses to know anything about you.
   service reads and writes the bucket itself; this side passes object keys and
   needs no S3 driver for it.
 
-### 1. The package
-
-Not on Packagist. Point composer at the mirror:
-
-```json
-{
-    "repositories": [
-        { "type": "vcs", "url": "https://github.com/Mikhail-Kovchuk/clearcut-laravel" }
-    ]
-}
-```
+### 1. Install
 
 ```bash
-composer require clearcut/clearcut-laravel:^1.0
-php artisan vendor:publish --tag=clearcut-config   # optional; defaults work
+composer require clearcut/clearcut-laravel
+php artisan clearcut:install
 ```
 
-The service provider registers itself.
+Or on one line — `&&` in bash, `;` in Windows PowerShell 5.1, which has no `&&`:
+
+```powershell
+composer require clearcut/clearcut-laravel; php artisan clearcut:install
+```
+
+It takes two commands because composer runs no package's scripts on install,
+by design. `clearcut:install` does the rest:
+
+| | |
+|---|---|
+| `config/clearcut.php` | the config, published |
+| `app/Models/ClearcutJob.php` | the model the controller works against |
+| `database/migrations/<date>_create_clearcut_jobs_table.php` | the table, dated now |
+| `app/Http/Controllers/RecordingReviewController.php` | the controller the React screen calls |
+| `routes/clearcut.php` | its routes, loaded from `routes/api.php` with one `require` line |
+| `.env`, `.env.example` | `CLEARCUT_URL=` and `CLEARCUT_TOKEN=`, empty, where missing |
+| `php artisan migrate` | asked first |
+
+Where `routes/api.php` does not exist — Laravel 11 and 12 ship without it — it
+offers to run `php artisan install:api`, which creates the file and installs
+Sanctum.
+
+**Nothing already there is overwritten**, so running it again is safe: every
+file it publishes is application code from then on, and a re-run that replaced
+an adapted controller would undo that work without a word. `--force`
+overwrites, except the migration, which is never published twice. It ends by
+listing what is left to do by hand — steps 2 and 3 below.
+
+The table is where results are remembered. The service keeps jobs in memory
+and forgets them on restart, and it never overwrites an original — so this
+row is the only record of where the output and its audit file went.
 
 The version is the git tag, shared with the service: the client at `v1.4.0`
-speaks the contract of the service at `v1.4.0`. `^1.0` takes fixes and new
-endpoints; a `2.0` means the contract changed and is taken only on purpose.
+speaks the contract of the service at `v1.4.0`. Given no version, composer
+writes `^1.0` into `composer.json`, which takes fixes and new endpoints; a
+`2.0` means the contract changed and is taken only on purpose.
+
+Do not type the constraint on Windows. `composer` runs through a `.bat` file
+there, and cmd treats `^` as an escape and drops it: `:^1.0` arrives as `1.0`,
+which pins exactly 1.0.0, and every later `composer update` quietly stays on
+it. The only sign is a warning that the constraint "appears too strict".
 
 ### 2. The connection
 
@@ -92,44 +119,20 @@ The first says whether the service is reachable and which binaries it found;
 is open, so a readiness probe needs no credentials. The second does: a wrong
 token throws `ClearcutRequestException` with status 401.
 
-### 3. The table
+### 3. Adapt what was published
 
-Copy two files and migrate:
-
-| From `examples/` | To |
-|---|---|
-| `migration_create_clearcut_jobs_table.php` | `database/migrations/<timestamp>_create_clearcut_jobs_table.php` |
-| `ClearcutJob.php` | `app/Models/ClearcutJob.php` |
-
-```bash
-php artisan migrate
-```
-
-The table is where results are remembered. The service keeps jobs in memory
-and forgets them on restart, and it never overwrites an original — so this
-row is the only record of where the output and its audit file went.
-
-### 4. The controller and routes
-
-| From `examples/` | To |
-|---|---|
-| `RecordingReviewController.php` | `app/Http/Controllers/` |
-| `routes.php` | into `routes/api.php`, or whichever file carries your API routes |
-
-Their paths match what the React package's adapter calls, so changing one
-means changing the other. Laravel 12 ships without `routes/api.php`;
-`php artisan install:api` creates it, and installs Sanctum with it.
-
-Then adapt these — the controller does not run until the first two are done:
+The paths in `routes/clearcut.php` match what the React package's adapter
+calls, so changing one means changing the other. The controller does not run
+until the first two of these are done:
 
 - **The recording model.** `App\Models\Recording`, and `exists:recordings,id`
   in the validation rules, stand for whatever holds your recordings. It must
   give the recording's object key in the service's bucket as `source_key`:
   the key comes from a row, never from the request.
 - **Authentication and permission.** `auth:sanctum` and `can:process-recordings`
-  are placeholders. Replace them with your own guard and permission
-  middleware. As shipped, `can:` denies until that ability is defined, so a
-  copy fails closed with 403 rather than open.
+  in `routes/clearcut.php` are placeholders. Replace them with your own guard
+  and permission middleware. As shipped, `can:` denies until that ability is
+  defined, so a copy fails closed with 403 rather than open.
 - **Ownership.** A route id is a claim, not a fact. If not every permitted user
   may see every recording, check a policy on the recording in each action, or
   anyone can reach anyone's recording by changing a number.
@@ -137,18 +140,49 @@ Then adapt these — the controller does not run until the first two are done:
   your recordings. The review screen works without it, listing regions rather
   than drawing them over the video.
 
-### 5. Optional: processing without the UI
+### 4. Optional: processing without the UI
 
-`examples/ProcessRecording.php` is a queued job for a pipeline with nobody
+```bash
+php artisan clearcut:install --with-job
+```
+
+adds `app/Jobs/ProcessRecording.php`, a queued job for a pipeline with nobody
 watching — it starts a job, polls it and records the result. The controller
 does not use it: with the React screen, the browser polls through the
-controller. Copy it into `app/Jobs/` only if something dispatches work
-automatically, and then:
+controller. Take it only if something dispatches work automatically, and then:
 
 - run a queue worker (`php artisan queue:work`, under supervisor or systemd);
 - set the queue connection's `retry_after` above the job's `$timeout` (7200 s).
   Otherwise the queue decides a long encode has died and starts it a second
   time while the first is still running.
+
+### By hand
+
+Each piece is also a publish tag, for an application that wants some and not
+others:
+
+| Tag | Publishes |
+|---|---|
+| `clearcut-config` | `config/clearcut.php` |
+| `clearcut-models` | `app/Models/ClearcutJob.php` |
+| `clearcut-migrations` | `database/migrations/<date>_create_clearcut_jobs_table.php` |
+| `clearcut-controllers` | `app/Http/Controllers/RecordingReviewController.php` |
+| `clearcut-routes` | `routes/clearcut.php` — then add `require __DIR__.'/clearcut.php';` to `routes/api.php` |
+| `clearcut-jobs` | `app/Jobs/ProcessRecording.php` |
+
+```bash
+php artisan vendor:publish --tag=clearcut-migrations
+```
+
+Publish the migration once. `vendor:publish` checks whether the file exists
+before it puts today's date in the name, so a second run adds a second copy,
+and `migrate` then fails on a table that already exists. `clearcut:install`
+guards against that; the tag alone does not.
+
+The date is the moment of publishing where
+`database.migrations.update_date_on_publish` is on in `config/database.php` —
+as it is in new installs. An older application may not have that key; the file
+then keeps a fixed date, which still orders after the framework's own tables.
 
 ### Verified
 
