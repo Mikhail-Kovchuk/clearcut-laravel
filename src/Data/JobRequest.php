@@ -62,6 +62,7 @@ final class JobRequest
      * @param  array<int, array<string, mixed>>  $regions  reviewed regions; when present, detection is skipped
      * @param  string|null  $outputDestination  s3 | local; null leaves it to the service's default
      * @param  string  $markSize  large | medium | small — the logo or text, not the frame
+     * @param  float  $markSpeed  a multiple of the standard travel speed, 0.25 to 2.0
      */
     public function __construct(
         public readonly string $videoId,
@@ -77,6 +78,7 @@ final class JobRequest
         public readonly bool $reviewedByHuman = false,
         public readonly ?string $outputDestination = null,
         public readonly string $markSize = self::SIZE_LARGE,
+        public readonly float $markSpeed = 1.0,
     ) {
         if ($videoId === '' || $sourceKey === '') {
             throw new InvalidArgumentException('videoId and sourceKey are required');
@@ -88,6 +90,10 @@ final class JobRequest
 
         // The service refuses these too, but failing here names the caller's
         // own line rather than a rejected HTTP request.
+        if ($markSpeed < 0.25 || $markSpeed > 2.0) {
+            throw new InvalidArgumentException("Mark speed must be 0.25 to 2.0, got {$markSpeed}");
+        }
+
         if (! in_array($markSize, [self::SIZE_LARGE, self::SIZE_MEDIUM, self::SIZE_SMALL], true)) {
             throw new InvalidArgumentException("Unknown mark size: {$markSize}");
         }
@@ -124,6 +130,7 @@ final class JobRequest
             'partner' => $this->brand,
             'mark_type' => $this->markType,
             'mark_size' => $this->markSize,
+            'mark_speed' => $this->markSpeed,
             'fixed_preset' => $this->fixedPreset,
             'profile' => $this->profile,
             'reviewed_by_human' => $this->reviewedByHuman,

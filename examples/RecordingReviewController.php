@@ -5,7 +5,9 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Models\ClearcutJob;
+use App\Models\Recording;
 use Clearcut\Video\ClearcutClient;
+use Clearcut\Video\Data\BatchRequest;
 use Clearcut\Video\Data\JobRequest;
 use Clearcut\Video\Data\ProposedRegion;
 use Clearcut\Video\Exceptions\ClearcutRequestException;
@@ -160,6 +162,164 @@ class RecordingReviewController extends Controller
         // Record who asked, in your own audit trail.
 
         return response()->json(['id' => $record->id] + $status->toArray(), 202);
+    }
+
+    /**
+     * Start several recordings under one set of settings: detected for review,
+     * or processed straight away.
+     *
+     * One row per recording, created before the request, so every job the
+     * service starts has somewhere to report to. The browser polls the batch by
+     * the service's id, and each job in it comes back carrying the ROW's id —
+     * the id every other route here takes, and the one that outlives the
+     * service forgetting a finished job.
+     */
+    public function startBatch(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            // Recording ids, never object keys: see analyze().
+            'video_ids' => 'required|array|min:1|max:'.BatchRequest::MAX_RECORDINGS,
+            'video_ids.*' => 'required|integer|distinct|exists:recordings,id',
+            'kind' => 'required|in:analyse,process',
+            'mode' => 'required|in:none,fixed,auto,ai',
+            'redaction_style' => 'nullable|in:blur,solid,pixelate',
+            'brand' => 'nullable|string|max:64',
+            'mark_type' => 'nullable|in:logo,text,none',
+            'mark_size' => 'nullable|in:large,medium,small',
+            'mark_speed' => 'nullable|numeric|between:0.25,2',
+            'profile' => 'nullable|in:fast,balanced,thorough',
+            'output_destination' => 'nullable|in:s3,local',
+        ]);
+
+        $analyse = $validated['kind'] === 'analyse';
+        if ($analyse && $validated['mode'] === 'none') {
+            // Nothing to detect with redaction off; see analyze().
+            return response()->json(['message' => 'An analysis needs a detection mode'], 422);
+        }
+
+        // `Recording` is your application's own model for a recording — the
+        // row that knows its object key. Swap in whatever yours is called; the
+        // point is that the key comes from a row this user may see, never
+        // from the request.
+        $records = [];
+        foreach ($validated['video_ids'] as $recordingId) {
+            $recording = Recording::findOrFail($recordingId);
+            $records[] = ClearcutJob::create([
+                'source_key' => $recording->source_key,
+                'subject_type' => Recording::class,
+                'subject_id' => $recording->id,
+                'requested_by' => $request->user()?->getAuthIdentifier(),
+            ]);
+        }
+
+        try {
+            $settings = new JobRequest(
+                // The template's own id and key are not used: each recording
+                // brings its own. Filled so the DTO's checks still run.
+                videoId: (string) $records[0]->id,
+                sourceKey: $records[0]->source_key,
+                mode: $validated['mode'],
+                redactionStyle: $validated['redaction_style'] ?? JobRequest::STYLE_BLUR,
+                brand: $validated['brand'] ?? '',
+                // An analysis encodes nothing, so no brand is needed yet — the
+                // review's apply step carries it. See analyze().
+                markType: $analyse ? JobRequest::MARK_NONE : ($validated['mark_type'] ?? JobRequest::MARK_NONE),
+                profile: $validated['profile'] ?? 'balanced',
+                outputDestination: $validated['output_destination'] ?? null,
+                markSize: $validated['mark_size'] ?? JobRequest::SIZE_LARGE,
+                markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
+            );
+            $batch = $this->clearcut->processBatch(BatchRequest::of(
+                collect($records)->mapWithKeys(fn (ClearcutJob $r) => [(string) $r->id => $r->source_key])->all(),
+                $settings,
+                $analyse ? 'analyse' : 'process',
+            ));
+        } catch (\InvalidArgumentException $e) {
+            ClearcutJob::whereKey(collect($records)->pluck('id'))->delete();
+
+            return response()->json(['message' => $e->getMessage()], 422);
+        } catch (ClearcutRequestException $e) {
+            ClearcutJob::whereKey(collect($records)->pluck('id'))
+                ->update(['state' => 'failed', 'error' => $e->getMessage()]);
+
+            return response()->json(['message' => $e->getMessage()], 422);
+        } catch (ClearcutUnavailableException $e) {
+            ClearcutJob::whereKey(collect($records)->pluck('id'))->delete();
+
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
+
+        // Matched by the video id each job carries — the row's own id, sent
+        // above — rather than by position, which nothing guarantees.
+        $byId = collect($records)->keyBy(fn (ClearcutJob $r) => (string) $r->id);
+        foreach ($batch->jobs as $job) {
+            $byId->get((string) $job->videoId)?->update([
+                $analyse ? 'service_analysis_id' : 'service_job_id' => $job->jobId,
+                'state' => $job->state,
+            ]);
+        }
+
+        return response()->json($this->batchPayload($batch->toArray()), 202);
+    }
+
+    /**
+     * The whole batch in one poll, each job under its row's id.
+     */
+    public function batchStatus(string $batchId): JsonResponse
+    {
+        try {
+            $batch = $this->clearcut->batch($batchId);
+        } catch (ClearcutRequestException $e) {
+            return response()->json(['message' => $e->getMessage()], $e->status);
+        }
+
+        foreach ($batch->jobs as $job) {
+            ClearcutJob::where('service_analysis_id', $job->jobId)
+                ->orWhere('service_job_id', $job->jobId)
+                ->first()
+                ?->syncFrom($job);
+        }
+
+        return response()->json($this->batchPayload($batch->toArray()));
+    }
+
+    /**
+     * Stop whatever in a batch is still running.
+     */
+    public function cancelBatch(string $batchId): JsonResponse
+    {
+        try {
+            $cancelled = $this->clearcut->cancelBatch($batchId);
+        } catch (ClearcutRequestException $e) {
+            return response()->json(['message' => $e->getMessage()], $e->status);
+        }
+
+        return response()->json(['cancelled' => $cancelled]);
+    }
+
+    /**
+     * A batch as the browser sees it: every job under the row that stands for
+     * it. The service's job id stays out of the page, as on the single routes.
+     *
+     * @param  array<string, mixed>  $batch
+     * @return array<string, mixed>
+     */
+    private function batchPayload(array $batch): array
+    {
+        $ids = array_column($batch['jobs'], 'job_id');
+        $rows = ClearcutJob::whereIn('service_analysis_id', $ids)
+            ->orWhereIn('service_job_id', $ids)
+            ->get();
+
+        $batch['jobs'] = array_map(function (array $job) use ($rows) {
+            $row = $rows->first(fn (ClearcutJob $r) => in_array($job['job_id'], [$r->service_analysis_id, $r->service_job_id], true));
+            // The recording as the video id: the one the service knows is the
+            // row's own id, which names nothing on the page. The list labels
+            // its rows by recording, and the review plays the recording.
+            return ['id' => $row?->id, 'video_id' => (string) $row?->subject_id] + $job;
+        }, $batch['jobs']);
+
+        return $batch;
     }
 
     /**
@@ -439,6 +599,7 @@ class RecordingReviewController extends Controller
             'brand' => 'nullable|string|max:64',
             'mark_type' => 'required|in:logo,text,none',
             'mark_size' => 'nullable|in:large,medium,small',
+            'mark_speed' => 'nullable|numeric|between:0.25,2',
             'allow_undecided' => 'boolean',
             // "local" writes nothing to S3; see output() below.
             'output_destination' => 'nullable|in:s3,local',
@@ -457,6 +618,7 @@ class RecordingReviewController extends Controller
                 allowUndecided: (bool) ($validated['allow_undecided'] ?? false),
                 outputDestination: $validated['output_destination'] ?? null,
                 markSize: $validated['mark_size'] ?? 'large',
+                markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
             );
         } catch (ClearcutRequestException $e) {
             // A 409 means regions are still undecided and would not be

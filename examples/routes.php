@@ -10,16 +10,22 @@
  * calls. Change one and change the other, or the adapter will 404 against a
  * working backend and look like the service is down.
  *
- * Every route is behind authentication, and the controller re-checks that this
- * user may touch this recording. An id in a URL is a claim, not a fact: without
- * that check any authenticated user reaches anyone's recording by changing a
- * number.
+ * Every route is behind authentication AND a permission: `can:process-recordings`
+ * here, which denies until the application defines that ability — so a copy
+ * of this file fails closed, with a 403, rather than open. In psm-admin use its
+ * own `permission:` middleware instead.
+ *
+ * That is not the whole check. An id in a URL is a claim, not a fact: this
+ * controller does not verify that the user may see THAT recording, and an
+ * application where not everyone may see every recording must add it — a
+ * policy on the recording, checked in each action — or any permitted user
+ * reaches anyone's recording by changing a number.
  */
 
 use App\Http\Controllers\RecordingReviewController;
 use Illuminate\Support\Facades\Route;
 
-Route::middleware(['auth:sanctum'])
+Route::middleware(['auth:sanctum', 'can:process-recordings'])
     ->prefix('recordings')
     ->group(function () {
         // What this deployment offers — brands and profiles, from the service.
@@ -34,6 +40,15 @@ Route::middleware(['auth:sanctum'])
         // Start detection. Returns a job to poll; the work takes minutes, so
         // nothing here holds a request open waiting for it.
         Route::post('{recording}/analyze', [RecordingReviewController::class, 'analyze']);
+
+        // Several recordings under one set of settings. Polled as one batch,
+        // so the dialog draws one bar with a segment per recording and
+        // "cancel the rest" is one request. Each job in it comes back under
+        // its row's id, the id every other route here takes. Declared before
+        // the wildcards below, or "batches" would be read as a recording.
+        Route::post('batches', [RecordingReviewController::class, 'startBatch']);
+        Route::get('batches/{batchId}', [RecordingReviewController::class, 'batchStatus']);
+        Route::delete('batches/{batchId}', [RecordingReviewController::class, 'cancelBatch']);
 
         // A short-lived signed URL for the player. NOT a permanent link: the
         // review screen holds it for as long as the tab is open, and it points

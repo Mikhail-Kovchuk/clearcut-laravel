@@ -263,12 +263,14 @@ class ClearcutClient
         bool $allowUndecided = false,
         ?string $outputDestination = null,
         string $markSize = 'large',
+        float $markSpeed = 1.0,
     ): JobStatus {
         $payload = [
             'redaction_style' => $redactionStyle,
             'partner' => $brand,
             'mark_type' => $markType,
             'mark_size' => $markSize,
+            'mark_speed' => $markSpeed,
             'allow_undecided' => $allowUndecided,
         ];
         if ($outputDestination !== null) {
@@ -306,7 +308,10 @@ class ClearcutClient
      * The size and checksum come with it so the caller can let the browser
      * confirm a complete save before anything is released.
      *
-     * @return array{stream: StreamInterface, size: int, sha256: string, filename: string}
+     * `passes` is what was done — r, w or rw — for naming the file after the
+     * application's own record; `filename` is the service's name for it.
+     *
+     * @return array{stream: StreamInterface, size: int, sha256: string, filename: string, passes: string}
      */
     public function streamOutput(string $jobId, int $timeout = 600): array
     {
@@ -339,6 +344,7 @@ class ClearcutClient
             'size' => (int) $response->header('Content-Length'),
             'sha256' => $response->header('X-Content-SHA256'),
             'filename' => $name[1] ?? "{$jobId}.mp4",
+            'passes' => (string) $response->header('X-Clearcut-Passes'),
         ];
     }
 
