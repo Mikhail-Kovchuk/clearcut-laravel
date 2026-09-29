@@ -9,20 +9,21 @@ for screen recordings.
 
 ## What is and is not in here
 
-**In the package** (`src/`): the HTTP client, the data objects, the config and
-a service provider. It knows the service's contract and nothing else — no
-models, no tables, no audit log, no permission names.
+**In the package** (`src/`): the HTTP client, the data objects, the config, a
+cached brand list (`BrandLabels`) and a service provider. It knows the
+service's contract and nothing else — no models, no tables, no audit log, no
+permission names.
 
-**In `examples/`**: a migration, a model, a queued job, a controller and its
-routes, to copy and adapt. They are examples rather than package code because everything
-they do beyond calling the client is bound to one application's schema. A
-package that guessed at your claim columns would be harder to use than writing
-eighty lines yourself.
+**In `examples/`**, published by `clearcut:install`: a migration, a model, a
+controller and its routes, the file handling (`ClearcutFiles`), a queued job
+that follows each run (`WatchClearcutJob`) and two console commands. They are
+examples rather than package code because once published they are yours to
+change, and a `composer update` must not change them under you.
 
 The migration creates a standalone table with a polymorphic `subject`, so it
-attaches to whatever holds recordings without knowing what that is. The
-controller is the one place that has to know: it looks a recording up to find
-its key in the bucket, and that lookup is yours to write — step 4 below.
+attaches to whatever holds recordings without knowing what that is. What the
+examples need to know about your recordings — the model, its disk, the
+attribute with its path — is in `config/clearcut.php`, under `recordings`.
 
 That split is the whole design. The reusable part is genuinely reusable
 because it refuses to know anything about you.
@@ -34,8 +35,9 @@ because it refuses to know anything about you.
 - PHP 8.2+ and Laravel 11 or 12. Nothing else is installed: the package needs
   only what the framework already ships, Guzzle included.
 - A running clearcut-video service this server can reach, and its token. The
-  service reads and writes the bucket itself; this side passes object keys and
-  needs no S3 driver for it.
+  service reads and writes its storage itself — a bucket, or a directory such
+  as this application's `public` disk — and this side passes keys, needing no
+  S3 driver for it.
 
 ### 1. Install
 
@@ -60,6 +62,9 @@ by design. `clearcut:install` does the rest:
 | `database/migrations/<date>_create_clearcut_jobs_table.php` | the table, dated now |
 | `app/Http/Controllers/RecordingReviewController.php` | the controller the React screen calls |
 | `routes/clearcut.php` | its routes, loaded from `routes/api.php` with one `require` line |
+| `app/Services/ClearcutFiles.php` | which file the service reads; putting a finished video in place |
+| `app/Jobs/WatchClearcutJob.php` | follows each run on the queue, so it finishes with the page closed |
+| `app/Console/Commands/ClearcutProcess.php`, `ClearcutSync.php` | `clearcut:process` and `clearcut:sync` |
 | `.env`, `.env.example` | `CLEARCUT_URL=` and `CLEARCUT_TOKEN=`, empty, where missing |
 | `php artisan migrate` | asked first |
 
@@ -100,8 +105,15 @@ CLEARCUT_TOKEN=the-same-token-the-service-has
 | `CLEARCUT_TOKEN` | — | the service's `CLEARCUT_AUTH_TOKEN`; required |
 | `CLEARCUT_TIMEOUT` | `30` | seconds per HTTP request, not per job |
 | `CLEARCUT_RETRIES` | `2` | retries when the service cannot be reached |
-| `CLEARCUT_POLL_INTERVAL` | `10` | seconds between polls, queued job only |
-| `CLEARCUT_MAX_JOB_SECONDS` | `3600` | when the queued job gives up waiting |
+| `CLEARCUT_POLL_INTERVAL` | `10` | seconds between polls of a client that waits |
+| `CLEARCUT_MAX_JOB_SECONDS` | `3600` | when a watch gives up waiting |
+| `CLEARCUT_ENABLED` | `true` | `false` refuses new runs; running ones finish |
+| `CLEARCUT_WATCH_INTERVAL` | `30` | seconds between polls of `WatchClearcutJob` |
+| `CLEARCUT_LOG_CHANNEL` | — | log channel for the examples; the default channel when empty |
+| `CLEARCUT_RECORDINGS_DISK` | `public` | the disk holding the recordings |
+| `CLEARCUT_REPLACE_ORIGINAL` | `false` | put finished videos in place of the recordings — see below |
+| `CLEARCUT_PRIVATE_DISK` | `local` | where the originals are kept, with replacement on |
+| `CLEARCUT_DELETE_ORIGINALS` | `false` | let `ClearcutFiles::deleteOriginals()` delete them |
 
 The service must not be reachable from the internet. It holds storage
 credentials and processes recordings full of personal data, and the token is
@@ -125,36 +137,134 @@ The paths in `routes/clearcut.php` match what the React package's adapter
 calls, so changing one means changing the other. The controller does not run
 until the first two of these are done:
 
-- **The recording model.** `App\Models\Recording`, and `exists:recordings,id`
-  in the validation rules, stand for whatever holds your recordings. It must
-  give the recording's object key in the service's bucket as `source_key`:
-  the key comes from a row, never from the request.
+- **The recordings, in `config/clearcut.php`.** `recordings.model` is the
+  model whose primary key the routes take as `{recording}` and `video_ids`;
+  `recordings.disk` and `recordings.path` say where its file is. The service
+  reads the key from that row, never from the request: `recordings.path`, or
+  `recordings.source_key` when the service knows the file by another
+  attribute. With S3 that is the object key; with the service on filesystem
+  storage it is the path relative to `CLEARCUT_STORAGE_ROOT` — for recordings
+  on the `public` disk, the path the row already stores, with the root set to
+  `storage/app/public`. The service's README, "Storage: a bucket or a
+  directory", has the settings.
 - **Authentication and permission.** `auth:sanctum` and `can:process-recordings`
   in `routes/clearcut.php` are placeholders. Replace them with your own guard
   and permission middleware. As shipped, `can:` denies until that ability is
-  defined, so a copy fails closed with 403 rather than open.
+  defined, so a copy fails closed with 403 rather than open. Without Sanctum,
+  see below: the file is best loaded from somewhere else.
 - **Ownership.** A route id is a claim, not a fact. If not every permitted user
   may see every recording, check a policy on the recording in each action, or
   anyone can reach anyone's recording by changing a number.
-- **`videoUrl()`** is a stub returning 501. Write it against the disk that holds
-  your recordings. The review screen works without it, listing regions rather
-  than drawing them over the video.
+- **Your own rules.** `refusalFor()` in the controller returns why a recording
+  may not be processed — not a video, expired, already carrying a burned-in
+  mark — and is checked on every start and on apply. It refuses nothing as
+  shipped.
+- **`videoUrl()`** signs a 30-minute URL where the disk can (S3, a local disk
+  with `serve`), and returns the disk's plain URL otherwise.
 
-### 4. Optional: processing without the UI
+#### Without Sanctum
+
+`clearcut:install` loads `routes/clearcut.php` from `routes/api.php` and
+guards it with `auth:sanctum`. In an application that authenticates some other
+way — JWT, a session guard, its own middleware — that guard does not exist and
+every route fails with a 500 before the controller runs.
+
+Load the file from the route group that already protects your admin panel
+instead, so it takes that group's authentication, prefix and name:
+
+1. Remove `require __DIR__.'/clearcut.php';` from the end of `routes/api.php`.
+2. Add it inside the panel's group — for example in `routes/admin.php`:
+
+   ```php
+   Route::group(['middleware' => ['jwt.verify', 'admin']], function () {
+       // ...the panel's own routes...
+
+       require __DIR__.'/clearcut.php';
+   });
+   ```
+
+3. In `routes/clearcut.php`, drop `auth:sanctum`: the group authenticates now.
+   Keep a permission if not every user of the panel may process recordings
+   (`permission:process_recordings`, in whatever form your application writes
+   one), or drop the middleware entirely if they all may:
+
+   ```php
+   Route::prefix('recordings')->group(function () {
+   ```
+
+4. Check where the routes landed and what guards them:
+
+   ```bash
+   php artisan route:list --path=recordings -v
+   ```
+
+5. The paths now start with the group's prefix — `admin/recordings/...`
+   rather than `api/recordings/...` — so the React adapter is created with it:
+   `createClearcutApi('/admin/recordings')`.
+
+### 4. Background work and resuming
+
+Every run the controller starts is followed by `WatchClearcutJob` on the
+queue: one poll per attempt, released back to the queue between polls, so it
+never holds a worker. The user can close the dialog and leave; the run
+finishes, and with replacement on it is put in place. Run a worker
+(`php artisan queue:work`, under supervisor or systemd). On the `sync` driver
+the watch polls once, and the status routes below settle the rest whenever
+they are asked.
+
+The rows are the record of what runs, so any browser can find its way back:
+
+| Route | |
+|---|---|
+| `GET recordings/status?video_ids[]=…` | per recording: `state` (`running`, `review`, `done`, `failed`, `none`), the last encode's `redacted` / `watermarked` / `regions` / `processed_at`, and `run` — the latest open run with its settings, to reopen the dialog on |
+| `POST recordings/cancel` `{video_ids}` | stop the running work of those recordings |
+
+Rows still running are synced with the service on each status request, and a
+job the service no longer knows (it restarted) is failed rather than left
+running for ever.
+
+From the console, through the same controller actions and checks:
 
 ```bash
-php artisan clearcut:install --with-job
+php artisan clearcut:process --video=12 --video=13 --mode=auto --mark=logo --brand=acme --wait
+php artisan clearcut:process --video=12 --review          # detect; review in the panel
+php artisan clearcut:sync                                 # settle what a stopped worker left open
+php artisan clearcut:sync --minutes=30 --clean-temp       # worth scheduling
 ```
 
-adds `app/Jobs/ProcessRecording.php`, a queued job for a pipeline with nobody
-watching — it starts a job, polls it and records the result. The controller
-does not use it: with the React screen, the browser polls through the
-controller. Take it only if something dispatches work automatically, and then:
+### 5. Optional: replacing the original
 
-- run a queue worker (`php artisan queue:work`, under supervisor or systemd);
-- set the queue connection's `retry_after` above the job's `$timeout` (7200 s).
-  Otherwise the queue decides a long encode has died and starts it a second
-  time while the first is still running.
+By default the service writes its output beside the original, under its own
+`processed/` prefix, and the recording is untouched: `output_key` on the row
+says where the result went.
+
+With `CLEARCUT_REPLACE_ORIGINAL=true` the finished video takes the
+recording's place instead:
+
+- before its first run `name.mp4` is copied to `name_org.mp4` on the private
+  disk, and the service reads only that copy;
+- a finished encode is checked against its audit's hashes, moved beside the
+  recording as `name_r.mp4`, `name_w.mp4` or `name_rw.mp4` (redacted,
+  watermarked, both), `path` is pointed at it, and the public original is
+  deleted — only after the private copy has matched the audit's source hash;
+- every later run starts from `_org` again, so nothing is redacted twice or
+  stamped with a second mark.
+
+The original stays private because it still holds what the redaction covers.
+This needs:
+
+- a nullable string column for `replace_original.original_path` on the
+  recordings table (`original_path` by default);
+- local disks, and the service on filesystem storage with
+  `CLEARCUT_STORAGE_ROOT` at the private disk's root (`storage/app/private`
+  for Laravel 11+'s `local` disk) and `CLEARCUT_STORAGE_ORIGINALS_PREFIX`
+  naming the folder the recordings are in.
+
+`ClearcutFiles::deleteOriginals($recordings)` deletes the `_org` copies when
+`CLEARCUT_DELETE_ORIGINALS=true` — call it when a recording is final, from
+whatever event means that in your application. A recording with work in
+progress keeps its copy. After that it can no longer be processed, and is
+refused rather than processed again from its redacted copy.
 
 ### By hand
 
@@ -168,7 +278,9 @@ others:
 | `clearcut-migrations` | `database/migrations/<date>_create_clearcut_jobs_table.php` |
 | `clearcut-controllers` | `app/Http/Controllers/RecordingReviewController.php` |
 | `clearcut-routes` | `routes/clearcut.php` — then add `require __DIR__.'/clearcut.php';` to `routes/api.php` |
-| `clearcut-jobs` | `app/Jobs/ProcessRecording.php` |
+| `clearcut-services` | `app/Services/ClearcutFiles.php` |
+| `clearcut-jobs` | `app/Jobs/WatchClearcutJob.php` |
+| `clearcut-commands` | `app/Console/Commands/ClearcutProcess.php`, `ClearcutSync.php` |
 
 ```bash
 php artisan vendor:publish --tag=clearcut-migrations
@@ -293,6 +405,14 @@ $this->clearcut->health();     // reachable? which binaries resolved?
 `health()` never throws — a health check that throws cannot be used where a
 health check is wanted.
 
+For a brand's name on a page that is not about processing, `BrandLabels` keeps
+the list for an hour instead of asking each time:
+
+```php
+app(Clearcut\Video\BrandLabels::class)->labelFor('acme');   // 'Acme', or 'acme' when unknown
+app(Clearcut\Video\BrandLabels::class)->has('acme');
+```
+
 ## Failures
 
 Two exceptions, separated by the one distinction that changes what to do:
@@ -308,13 +428,13 @@ undecided — go back and decide them.
 
 ## Two mistakes worth not repeating
 
-Both are in `examples/ProcessRecording.php`, and both have cost real time on
-work like this.
+Both have cost real time on work like this.
 
 **Release the claim on EVERY exit path**, not just success and the failure
 handler. An early return that forgets leaves a recording reporting "in
 progress" until somebody clears it by hand. That is what `finally` is for —
 and `failed()` too, because a terminated process never reaches `finally`.
+`clearcut:sync` is the cure for rows that were left open anyway.
 
 **A killed process logs nothing.** OOM, a deploy, a worker restart: it never
 reaches its error handler. Log a start and a finish line as a pair, so the

@@ -87,8 +87,17 @@ class ClearcutServiceProvider extends ServiceProvider
             ], 'clearcut-routes');
 
             $this->publishes([
-                __DIR__.'/../examples/ProcessRecording.php' => app_path('Jobs/ProcessRecording.php'),
+                __DIR__.'/../examples/ClearcutFiles.php' => app_path('Services/ClearcutFiles.php'),
+            ], 'clearcut-services');
+
+            $this->publishes([
+                __DIR__.'/../examples/WatchClearcutJob.php' => app_path('Jobs/WatchClearcutJob.php'),
             ], 'clearcut-jobs');
+
+            $this->publishes([
+                __DIR__.'/../examples/Commands/ClearcutProcess.php' => app_path('Console/Commands/ClearcutProcess.php'),
+                __DIR__.'/../examples/Commands/ClearcutSync.php' => app_path('Console/Commands/ClearcutSync.php'),
+            ], 'clearcut-commands');
 
             $this->commands([InstallCommand::class]);
         }

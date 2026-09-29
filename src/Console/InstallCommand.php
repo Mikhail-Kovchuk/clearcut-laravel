@@ -21,7 +21,6 @@ use Illuminate\Filesystem\Filesystem;
 class InstallCommand extends Command
 {
     protected $signature = 'clearcut:install
-        {--with-job : Also publish ProcessRecording, the queued job for processing without the UI}
         {--force : Overwrite files that already exist (never the migration)}';
 
     protected $description = 'Publish the clearcut config and examples, wire the routes and run the migration';
@@ -35,10 +34,9 @@ class InstallCommand extends Command
         $this->publishMigration($files);
         $this->publish('clearcut-controllers', app_path('Http/Controllers/RecordingReviewController.php'), 'app/Http/Controllers/RecordingReviewController.php');
         $this->publish('clearcut-routes', base_path('routes/clearcut.php'), 'routes/clearcut.php');
-
-        if ($this->option('with-job')) {
-            $this->publish('clearcut-jobs', app_path('Jobs/ProcessRecording.php'), 'app/Jobs/ProcessRecording.php');
-        }
+        $this->publish('clearcut-services', app_path('Services/ClearcutFiles.php'), 'app/Services/ClearcutFiles.php');
+        $this->publish('clearcut-jobs', app_path('Jobs/WatchClearcutJob.php'), 'app/Jobs/WatchClearcutJob.php');
+        $this->publish('clearcut-commands', app_path('Console/Commands/ClearcutProcess.php'), 'app/Console/Commands/ClearcutProcess.php, ClearcutSync.php');
 
         $routesWired = $this->wireRoutes($files);
         $this->addEnvKeys($files);
@@ -174,10 +172,15 @@ class InstallCommand extends Command
     {
         $steps = [
             'Set CLEARCUT_URL and CLEARCUT_TOKEN in .env (the service\'s CLEARCUT_AUTH_TOKEN)',
-            'RecordingReviewController: replace App\\Models\\Recording with your recordings model',
-            'routes/clearcut.php: replace auth:sanctum and can:process-recordings with your guard and permission',
-            'If not every user may see every recording, check a policy in each controller action',
-            'Write videoUrl() against the disk that holds your recordings (a 501 stub until then)',
+            'config/clearcut.php: set recordings.model, disk and path to your recordings;'
+                .' turn on replace_original to put finished videos in place of the recordings',
+            'routes/clearcut.php: replace auth:sanctum and can:process-recordings with your guard and permission.'
+                .' Not on Sanctum (JWT, say)? Move the require line into the route group that already'
+                .' authenticates your panel, and drop auth:sanctum — see README, "Without Sanctum"',
+            'If not every user may see every recording, check a policy in each controller action;'
+                .' your own reasons to refuse a recording go in RecordingReviewController::refusalFor()',
+            'Run a queue worker (php artisan queue:work): WatchClearcutJob follows each run with the page closed.'
+                .' Schedule clearcut:sync to settle what a stopped worker left open',
         ];
 
         if (! $routesWired) {

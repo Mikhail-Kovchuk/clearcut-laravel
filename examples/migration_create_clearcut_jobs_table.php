@@ -54,6 +54,18 @@ return new class extends Migration
             $table->string('service_job_id', 64)->nullable()->index();
             $table->string('service_analysis_id', 64)->nullable()->index();
 
+            // The service's id for the batch this row was started in, so the
+            // recordings of one batch come back to the panel as one run.
+            $table->string('batch_id', 64)->nullable()->index();
+
+            // What was chosen when the run started — mode, cover style, brand,
+            // mark, output — and whether it stops for review. A run whose
+            // dialog was closed is offered back from here, to any browser; the
+            // review's apply encodes with these, and resumed without them it
+            // would have to guess the watermark, which is worse than not
+            // offering the way back at all.
+            $table->json('settings')->nullable();
+
             // queued | running | done | failed | cancelled — mirrors the
             // service's vocabulary so there is nothing to translate, and a
             // mismatch between the two is visible rather than hidden behind a
@@ -84,6 +96,22 @@ return new class extends Migration
             // The only durable record of what was covered and why — which
             // matters most when somebody asks months later.
             $table->string('audit_key', 1024)->nullable();
+
+            // Which passes the finished encode ran, as the service reports it:
+            // two separate questions, since a partner may need the mark and
+            // the redaction independently. They describe the OUTPUT above,
+            // never the recording — the original at the recording's own path
+            // is untouched by either, and a flag on it would say otherwise.
+            // Null until an encode has finished. A redaction pass that covered
+            // nothing still ran: `regions` says how much it covered.
+            $table->boolean('redacted')->nullable();
+            $table->boolean('watermarked')->nullable();
+
+            // When the application put the finished output where its users
+            // see it — beside the recording, in place of it. Taken with a
+            // conditional UPDATE, like the claim, so two polls arriving
+            // together cannot place one encode twice.
+            $table->timestamp('placed_at')->nullable();
 
             // How many regions were covered, and how many were proposed but
             // could not be resolved. The second is not decoration: a rejected

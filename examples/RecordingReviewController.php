@@ -4,55 +4,67 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Jobs\WatchClearcutJob;
 use App\Models\ClearcutJob;
-use App\Models\Recording;
+use App\Services\ClearcutFiles;
 use Clearcut\Video\ClearcutClient;
 use Clearcut\Video\Data\BatchRequest;
 use Clearcut\Video\Data\JobRequest;
+use Clearcut\Video\Data\JobStatus;
 use Clearcut\Video\Data\ProposedRegion;
 use Clearcut\Video\Exceptions\ClearcutRequestException;
 use Clearcut\Video\Exceptions\ClearcutUnavailableException;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Storage;
 
 /**
- * EXAMPLE — copy into app/Http/Controllers/ and adapt.
+ * EXAMPLE — published into app/Http/Controllers/ by clearcut:install.
  *
- * The admin panel talks to THIS, never to the service. That is not ceremony:
- * a browser reaching the service directly bypasses every authorisation check
- * here, and the service has no idea who a user is.
+ * The browser talks to THIS, never to the service: the service has no idea
+ * who a user is, and a browser reaching it directly bypasses every check here.
  *
- * Three things this layer owns, which the package deliberately does not:
+ * Recordings are the model named in `clearcut.recordings.model`; `{recording}`
+ * and `video_ids` are its primary keys. What this layer leaves to the
+ * application:
  *
- *   - **Authorisation.** Whose permission names apply is per application, so
- *     the middleware line below is a placeholder to replace.
- *   - **Ownership.** An id in a URL is a claim, not a fact. Without a check,
- *     any authenticated user could work on anyone's recording by changing a
- *     number.
- *   - **Audit.** Who asked for what, in the application's own trail.
+ *   - **Ownership.** An id in a URL is a claim, not a fact. Where not every
+ *     user may see every recording, check a policy in each action.
+ *   - **Its own rules** for refusing a recording: refusalFor() below.
  *
- * It works against `ClearcutJob` and its standalone table. The one thing it
- * needs from the application is `Recording` — the row that knows a
- * recording's key in the bucket. Swap in whatever yours is called.
+ * Every run is followed by WatchClearcutJob on the queue, so it finishes —
+ * and with `clearcut.replace_original` is put in place — with the page closed.
  */
 class RecordingReviewController extends Controller
 {
-    public function __construct(private readonly ClearcutClient $clearcut)
-    {
-        // Replace with your own gate. Left commented rather than invented,
-        // because a permission name this application does not have would fail
-        // in a way that looks like the package being broken.
-        //
-        // $this->middleware('permission:recordings.redact');
-    }
+    private const ENCODE_RULES = [
+        'redaction_style' => 'nullable|in:blur,solid,pixelate',
+        'brand' => 'nullable|string|max:64',
+        'mark_type' => 'nullable|in:logo,text,none',
+        'mark_size' => 'nullable|in:large,medium,small',
+        'mark_speed' => 'nullable|numeric|between:0.25,2',
+        'output_destination' => 'nullable|in:s3,local',
+    ];
+
+    public function __construct(
+        private readonly ClearcutClient $clearcut,
+        private readonly ClearcutFiles $files,
+    ) {}
 
     /**
-     * What this deployment can do — brands and profiles, from the service.
-     *
-     * Served to the panel rather than hardcoded in it: a brand added to the
-     * service's config, or a profile retuned, reaches the UI with no frontend
-     * release.
+     * Your application's reason not to process this recording, or null.
+     * Checked on every start and on apply. For example: not a video, expired,
+     * or already carrying a burned-in mark while `$markType` would add another.
      */
+    protected function refusalFor(Model $recording, ?string $markType): ?string
+    {
+        return null;
+    }
+
+    /** Brands, profiles and output settings offered by the service. */
     public function options(): JsonResponse
     {
         try {
@@ -68,24 +80,19 @@ class RecordingReviewController extends Controller
                     'sample_fps' => $profile->sampleFps,
                 ], $this->clearcut->profiles()),
 
-                // Where a finished video goes by default, and how long a local
-                // one waits on the service for its download.
                 'output' => $this->clearcut->settings(),
             ]);
         } catch (ClearcutUnavailableException $e) {
-            // 503, not 500: the panel should say "try again", not "something
-            // broke". Nothing about the request was wrong.
+            // 503: "try again", not "something broke".
             return response()->json(['message' => $e->getMessage()], 503);
+        } catch (ClearcutRequestException $e) {
+            // 502, not the service's status: its 401 means a wrong
+            // CLEARCUT_TOKEN, and passed on it would log the user out.
+            return response()->json(['message' => $e->getMessage()], 502);
         }
     }
 
-    /**
-     * The mark a brand would burn in, proxied from the service.
-     *
-     * Proxied rather than linked: the service is not reachable from a browser,
-     * and its brand assets live beside its own config. A logo comes back as an
-     * image, a wordmark as JSON.
-     */
+    /** A brand's mark: a PNG for a logo, JSON for a wordmark. */
     public function brandPreview(Request $request, string $slug): mixed
     {
         $markType = $request->query('mark_type', 'logo') === 'text' ? 'text' : 'logo';
@@ -104,44 +111,44 @@ class RecordingReviewController extends Controller
 
         return response($preview['image'], 200, [
             'Content-Type' => 'image/png',
-            // Brand assets change when someone edits the service's config,
-            // which is rare. An hour stops a batch refetching the same logo.
             'Cache-Control' => 'private, max-age=3600',
         ]);
     }
 
     /**
-     * Start a detection run for review. Returns a job to poll.
+     * Start detection for review. The source key comes from the recording's
+     * row, never from the request: a key the browser sends is one it chose.
      */
-    public function analyze(Request $request): JsonResponse
+    public function analyze(Request $request, string $recording): JsonResponse
     {
         $validated = $request->validate([
-            'source_key' => 'required|string|max:1024',
-            // No 'none' here: an analysis exists to find regions, and with
-            // redaction off there is nothing to find. A watermark-only job
-            // goes straight to process().
+            // No 'none': an analysis needs a detection mode.
             'mode' => 'required|in:fixed,auto,ai',
             'profile' => 'nullable|in:fast,balanced,thorough',
-        ]);
+        ] + self::ENCODE_RULES);
 
-        $record = ClearcutJob::create([
-            'source_key' => $validated['source_key'],
-            'requested_by' => $request->user()?->getAuthIdentifier(),
-        ]);
+        $recording = $this->files->findRecording($recording);
+        if ($refused = $this->refuseStart(collect([$recording]), $validated['mark_type'] ?? null)) {
+            return $refused;
+        }
+
+        try {
+            // Encode choices are stored now so the later apply can use them.
+            $record = $this->newRecord($request, $recording, self::settingsFrom($validated, review: true));
+        } catch (\RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
 
         try {
             $status = $this->clearcut->analyze(new JobRequest(
                 videoId: (string) $record->id,
                 sourceKey: $record->source_key,
                 mode: $validated['mode'],
-                // Detection only — nothing is encoded, so no brand is needed.
+                // Detection only; the mark is chosen at apply.
                 markType: JobRequest::MARK_NONE,
                 profile: $validated['profile'] ?? 'balanced',
             ));
         } catch (\InvalidArgumentException $e) {
-            // The DTO refuses impossible combinations before any request is
-            // made. That is the caller's mistake, not a server failure — 422,
-            // not the 500 an uncaught exception would produce.
             $record->delete();
 
             return response()->json(['message' => $e->getMessage()], 422);
@@ -160,70 +167,208 @@ class RecordingReviewController extends Controller
             'state' => $status->state,
         ]);
 
-        // Record who asked, in your own audit trail.
+        $this->log()->info('clearcut.start', ['kind' => 'analyse', 'job_row' => $record->id, 'recording' => $recording->getKey(), 'user' => $request->user()?->getAuthIdentifier()]);
+        dispatch(WatchClearcutJob::forRow($record->id));
+
+        return response()->json(['id' => $record->id] + $status->toArray(), 202);
+    }
+
+    /** Detect and encode in one step, without review. */
+    public function process(Request $request, string $recording): JsonResponse
+    {
+        $validated = $request->validate([
+            'mode' => 'required|in:none,fixed,auto,ai',
+            'profile' => 'nullable|in:fast,balanced,thorough',
+        ] + self::ENCODE_RULES);
+
+        $recording = $this->files->findRecording($recording);
+        if ($refused = $this->refuseStart(collect([$recording]), $validated['mark_type'] ?? null)) {
+            return $refused;
+        }
+
+        try {
+            $record = $this->newRecord($request, $recording, self::settingsFrom($validated, review: false));
+        } catch (\RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
+
+        try {
+            $status = $this->clearcut->process(new JobRequest(
+                videoId: (string) $record->id,
+                sourceKey: $record->source_key,
+                mode: $validated['mode'],
+                redactionStyle: $validated['redaction_style'] ?? JobRequest::STYLE_BLUR,
+                brand: $validated['brand'] ?? '',
+                markType: $validated['mark_type'] ?? JobRequest::MARK_NONE,
+                profile: $validated['profile'] ?? 'balanced',
+                outputDestination: $validated['output_destination'] ?? null,
+                markSize: $validated['mark_size'] ?? JobRequest::SIZE_LARGE,
+                markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
+            ));
+        } catch (\InvalidArgumentException $e) {
+            $record->delete();
+
+            return response()->json(['message' => $e->getMessage()], 422);
+        } catch (ClearcutRequestException $e) {
+            $record->update(['state' => 'failed', 'error' => $e->getMessage()]);
+
+            return response()->json(['message' => $e->getMessage()], 422);
+        } catch (ClearcutUnavailableException $e) {
+            $record->delete();
+
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
+
+        // Nobody reviewed this one: reviewed_by_human stays false, as in the audit.
+        $record->update([
+            'service_job_id' => $status->jobId,
+            'state' => $status->state,
+        ]);
+
+        $this->log()->info('clearcut.start', ['kind' => 'process', 'job_row' => $record->id, 'recording' => $recording->getKey(), 'user' => $request->user()?->getAuthIdentifier()]);
+        dispatch(WatchClearcutJob::forRow($record->id));
 
         return response()->json(['id' => $record->id] + $status->toArray(), 202);
     }
 
     /**
-     * Start several recordings under one set of settings: detected for review,
-     * or processed straight away.
+     * The row a job reports to.
      *
-     * One row per recording, created before the request, so every job the
-     * service starts has somewhere to report to. The browser polls the batch by
-     * the service's id, and each job in it comes back carrying the ROW's id —
-     * the id every other route here takes, and the one that outlives the
-     * service forgetting a finished job.
+     * @param  array<string, mixed>  $settings
      */
+    private function newRecord(Request $request, Model $recording, array $settings, ?string $sourceKey = null): ClearcutJob
+    {
+        return ClearcutJob::create([
+            'source_key' => $sourceKey ?? $this->files->sourceKeyFor($recording),
+            'subject_type' => $recording->getMorphClass(),
+            'subject_id' => $recording->getKey(),
+            'settings' => $settings,
+            'requested_by' => $request->user()?->getAuthIdentifier(),
+        ]);
+    }
+
+    /**
+     * Why these recordings cannot be started, or null. The whole start is
+     * refused if any fails; otherwise their older pending reviews are
+     * superseded, so a recording never has two.
+     *
+     * @param  Collection<int, Model>  $recordings
+     */
+    private function refuseStart(Collection $recordings, ?string $markType): ?JsonResponse
+    {
+        if (! config('clearcut.enabled', true)) {
+            return response()->json(['message' => 'Video processing is switched off (CLEARCUT_ENABLED).'], 422);
+        }
+
+        $problems = [];
+        $busy = false;
+
+        foreach ($recordings as $recording) {
+            $reason = $this->refusalFor($recording, $markType);
+
+            if ($reason === null && $this->rowsOf(collect([$recording]))
+                ->whereIn('state', [JobStatus::QUEUED, JobStatus::RUNNING])
+                ->exists()) {
+                $reason = 'is already being processed';
+                $busy = true;
+            }
+
+            if ($reason !== null) {
+                $problems[] = ['id' => $recording->getKey(), 'reason' => $reason];
+            }
+        }
+
+        if ($problems !== []) {
+            $message = collect($problems)->map(fn ($p) => "Recording {$p['id']} {$p['reason']}")->implode('; ');
+            $this->log()->info('clearcut.start_refused', ['recordings' => $recordings->map(fn (Model $r) => $r->getKey())->all(), 'problems' => count($problems)]);
+
+            // 409 when waiting would help, 422 when the selection is wrong.
+            return response()->json(['message' => $message.'.', 'problems' => $problems], $busy && count($problems) === 1 ? 409 : 422);
+        }
+
+        $superseded = $this->rowsOf($recordings)
+            ->where('state', JobStatus::DONE)
+            ->whereNull('service_job_id')
+            ->whereNotNull('settings')
+            ->get();
+        foreach ($superseded as $row) {
+            try {
+                $this->clearcut->discardProposal((string) $row->service_analysis_id);
+            } catch (ClearcutRequestException|ClearcutUnavailableException) {
+                // Proposals expire on their own.
+            }
+            $row->update(['state' => JobStatus::CANCELLED, 'error' => 'Superseded by a newer run', 'finished_at' => now()]);
+        }
+        if ($superseded->isNotEmpty()) {
+            $this->log()->info('clearcut.review_superseded', ['job_rows' => $superseded->pluck('id')->all()]);
+        }
+
+        return null;
+    }
+
+    /**
+     * The run's choices as sent, for resuming it. Missing keys stay missing.
+     *
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private static function settingsFrom(array $validated, bool $review): array
+    {
+        return array_intersect_key($validated, array_flip([
+            'mode', 'profile', 'redaction_style', 'brand', 'mark_type',
+            'mark_size', 'mark_speed', 'output_destination',
+        ])) + ['review' => $review];
+    }
+
+    /** Start several recordings under one set of settings; one row per recording. */
     public function startBatch(Request $request): JsonResponse
     {
         $validated = $request->validate([
             // Recording ids, never object keys: see analyze().
             'video_ids' => 'required|array|min:1|max:'.BatchRequest::MAX_RECORDINGS,
-            'video_ids.*' => 'required|integer|distinct|exists:recordings,id',
+            'video_ids.*' => 'required|distinct',
             'kind' => 'required|in:analyse,process',
             'mode' => 'required|in:none,fixed,auto,ai',
-            'redaction_style' => 'nullable|in:blur,solid,pixelate',
-            'brand' => 'nullable|string|max:64',
-            'mark_type' => 'nullable|in:logo,text,none',
-            'mark_size' => 'nullable|in:large,medium,small',
-            'mark_speed' => 'nullable|numeric|between:0.25,2',
             'profile' => 'nullable|in:fast,balanced,thorough',
-            'output_destination' => 'nullable|in:s3,local',
-        ]);
+        ] + self::ENCODE_RULES);
 
         $analyse = $validated['kind'] === 'analyse';
         if ($analyse && $validated['mode'] === 'none') {
-            // Nothing to detect with redaction off; see analyze().
             return response()->json(['message' => 'An analysis needs a detection mode'], 422);
         }
 
-        // `Recording` is your application's own model for a recording — the
-        // row that knows its object key. Swap in whatever yours is called; the
-        // point is that the key comes from a row this user may see, never
-        // from the request.
+        $recordings = $this->files->model()::findMany($validated['video_ids'])->keyBy(fn (Model $r) => (string) $r->getKey());
+        $missing = array_diff(array_map('strval', $validated['video_ids']), $recordings->keys()->all());
+        if ($missing !== []) {
+            return response()->json(['message' => 'No such recording: '.implode(', ', $missing)], 422);
+        }
+
+        if ($refused = $this->refuseStart($recordings->values(), $validated['mark_type'] ?? null)) {
+            return $refused;
+        }
+
+        // All sources resolved before any row is created.
+        try {
+            $sources = $recordings->map(fn (Model $r) => $this->files->sourceKeyFor($r));
+        } catch (\RuntimeException $e) {
+            return response()->json(['message' => $e->getMessage()], 409);
+        }
+
+        $settings = self::settingsFrom($validated, review: $analyse);
         $records = [];
-        foreach ($validated['video_ids'] as $recordingId) {
-            $recording = Recording::findOrFail($recordingId);
-            $records[] = ClearcutJob::create([
-                'source_key' => $recording->source_key,
-                'subject_type' => Recording::class,
-                'subject_id' => $recording->id,
-                'requested_by' => $request->user()?->getAuthIdentifier(),
-            ]);
+        foreach ($validated['video_ids'] as $id) {
+            $records[] = $this->newRecord($request, $recordings[(string) $id], $settings, $sources[(string) $id]);
         }
 
         try {
-            $settings = new JobRequest(
-                // The template's own id and key are not used: each recording
-                // brings its own. Filled so the DTO's checks still run.
+            $template = new JobRequest(
+                // Template only: each recording brings its own id and key.
                 videoId: (string) $records[0]->id,
                 sourceKey: $records[0]->source_key,
                 mode: $validated['mode'],
                 redactionStyle: $validated['redaction_style'] ?? JobRequest::STYLE_BLUR,
                 brand: $validated['brand'] ?? '',
-                // An analysis encodes nothing, so no brand is needed yet — the
-                // review's apply step carries it. See analyze().
+                // An analysis encodes nothing; apply carries the mark.
                 markType: $analyse ? JobRequest::MARK_NONE : ($validated['mark_type'] ?? JobRequest::MARK_NONE),
                 profile: $validated['profile'] ?? 'balanced',
                 outputDestination: $validated['output_destination'] ?? null,
@@ -232,7 +377,7 @@ class RecordingReviewController extends Controller
             );
             $batch = $this->clearcut->processBatch(BatchRequest::of(
                 collect($records)->mapWithKeys(fn (ClearcutJob $r) => [(string) $r->id => $r->source_key])->all(),
-                $settings,
+                $template,
                 $analyse ? 'analyse' : 'process',
             ));
         } catch (\InvalidArgumentException $e) {
@@ -250,22 +395,23 @@ class RecordingReviewController extends Controller
             return response()->json(['message' => $e->getMessage()], 503);
         }
 
-        // Matched by the video id each job carries — the row's own id, sent
-        // above — rather than by position, which nothing guarantees.
+        // Matched by the row id each job carries, not by position.
         $byId = collect($records)->keyBy(fn (ClearcutJob $r) => (string) $r->id);
         foreach ($batch->jobs as $job) {
             $byId->get((string) $job->videoId)?->update([
                 $analyse ? 'service_analysis_id' : 'service_job_id' => $job->jobId,
+                'batch_id' => $batch->batchId,
                 'state' => $job->state,
             ]);
         }
 
+        $this->log()->info('clearcut.start', ['kind' => $analyse ? 'analyse' : 'process', 'batch' => $batch->batchId, 'job_rows' => collect($records)->pluck('id')->all(), 'user' => $request->user()?->getAuthIdentifier()]);
+        dispatch(WatchClearcutJob::forBatch($batch->batchId));
+
         return response()->json($this->batchPayload($batch->toArray()), 202);
     }
 
-    /**
-     * The whole batch in one poll, each job under its row's id.
-     */
+    /** The whole batch in one poll, each job under its row's id. */
     public function batchStatus(string $batchId): JsonResponse
     {
         try {
@@ -275,18 +421,19 @@ class RecordingReviewController extends Controller
         }
 
         foreach ($batch->jobs as $job) {
-            ClearcutJob::where('service_analysis_id', $job->jobId)
+            $row = ClearcutJob::where('service_analysis_id', $job->jobId)
                 ->orWhere('service_job_id', $job->jobId)
-                ->first()
-                ?->syncFrom($job);
+                ->first();
+            if ($row !== null) {
+                $row->syncFrom($job);
+                $this->files->place($row);
+            }
         }
 
         return response()->json($this->batchPayload($batch->toArray()));
     }
 
-    /**
-     * Stop whatever in a batch is still running.
-     */
+    /** Stop whatever in a batch is still running. */
     public function cancelBatch(string $batchId): JsonResponse
     {
         try {
@@ -299,8 +446,8 @@ class RecordingReviewController extends Controller
     }
 
     /**
-     * A batch as the browser sees it: every job under the row that stands for
-     * it. The service's job id stays out of the page, as on the single routes.
+     * Each job with its row id and its recording as `video_id`; the service's
+     * job id names nothing on the page.
      *
      * @param  array<string, mixed>  $batch
      * @return array<string, mixed>
@@ -314,18 +461,14 @@ class RecordingReviewController extends Controller
 
         $batch['jobs'] = array_map(function (array $job) use ($rows) {
             $row = $rows->first(fn (ClearcutJob $r) => in_array($job['job_id'], [$r->service_analysis_id, $r->service_job_id], true));
-            // The recording as the video id: the one the service knows is the
-            // row's own id, which names nothing on the page. The list labels
-            // its rows by recording, and the review plays the recording.
+
             return ['id' => $row?->id, 'video_id' => (string) $row?->subject_id] + $job;
         }, $batch['jobs']);
 
         return $batch;
     }
 
-    /**
-     * Poll an analysis or an encode.
-     */
+    /** Poll an analysis or an encode. */
     public function status(ClearcutJob $record): JsonResponse
     {
         $serviceJobId = $record->service_job_id ?? $record->service_analysis_id;
@@ -337,29 +480,15 @@ class RecordingReviewController extends Controller
         try {
             $status = $this->clearcut->job($serviceJobId);
         } catch (ClearcutRequestException $e) {
-            // The service forgets finished jobs after an hour. The row here is
-            // the authoritative record, so a 404 from the service is not an
-            // error if this row already knows the outcome.
+            // The service forgets finished jobs after an hour; the row keeps the outcome.
             if ($e->isNotFound() && $record->finished_at !== null) {
                 return response()->json($record->only([
                     'state', 'stage', 'progress', 'output_key', 'audit_key', 'error',
                 ]));
             }
 
-            // Unknown to the service while this row still says it runs: the
-            // service restarted or was stopped mid-job, and its registry lives
-            // in memory. Nothing will ever finish this row, so it is failed
-            // here and its claim released — left as it was, it stays "running"
-            // for ever and the panel keeps offering to go back to it.
             if ($e->isNotFound()) {
-                $record->update([
-                    'state' => 'failed',
-                    'stage' => 'failed',
-                    'error' => 'The service no longer knows this job: it restarted '
-                        .'or was stopped while the job ran. Start it again.',
-                    'claimed_at' => null,
-                    'finished_at' => now(),
-                ]);
+                $record->markLost();
 
                 return response()->json($record->only(['state', 'stage', 'progress', 'error']));
             }
@@ -368,16 +497,209 @@ class RecordingReviewController extends Controller
         }
 
         $record->syncFrom($status);
+        $this->files->place($record);
+
+        // A failed placement turns the row to failed.
+        if ($record->state === JobStatus::FAILED && $status->succeeded()) {
+            return response()->json(['id' => $record->id] + $record->only(['state', 'stage', 'error']));
+        }
 
         return response()->json($status->toArray());
     }
 
     /**
-     * Ask a running job to stop.
-     *
-     * Safe at any point: the service verifies output before uploading it, so
-     * a cancelled job leaves nothing half-written in storage.
+     * Per-recording state and the run to resume, for `video_ids`. Rows still
+     * running are synced with the service first, so the answer is current
+     * even with no watch on the queue.
      */
+    public function recordingsStatus(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'video_ids' => 'required|array|min:1|max:500',
+            'video_ids.*' => 'required|distinct',
+        ]);
+
+        $recordings = $this->files->model()::findMany($validated['video_ids']);
+        $rows = $this->rowsOf($recordings)->orderBy('id')->get();
+
+        foreach ($rows->whereIn('state', [JobStatus::QUEUED, JobStatus::RUNNING]) as $row) {
+            try {
+                $row->syncFrom($this->clearcut->job((string) ($row->service_job_id ?? $row->service_analysis_id)));
+            } catch (ClearcutRequestException $e) {
+                if ($e->isNotFound()) {
+                    $row->markLost();
+                }
+            } catch (ClearcutUnavailableException) {
+                // Left as it is.
+            }
+        }
+
+        foreach ($rows as $row) {
+            $this->files->place($row);
+        }
+
+        $files = $recordings->map(fn (Model $recording) => ['id' => $recording->getKey()]
+            + self::fileState($rows->where('subject_id', $recording->getKey())))->values();
+
+        return response()->json([
+            'enabled' => (bool) config('clearcut.enabled', true),
+            'in_progress' => $files->contains(fn ($f) => $f['state'] === 'running'),
+            'run' => $this->runToResume($rows),
+            'files' => $files,
+        ]);
+    }
+
+    /** Stop the running work of `video_ids`. Finished jobs stay finished. */
+    public function cancelRecordings(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'video_ids' => 'required|array|min:1|max:500',
+            'video_ids.*' => 'required|distinct',
+        ]);
+
+        $recordings = $this->files->model()::findMany($validated['video_ids']);
+        $rows = $this->rowsOf($recordings)
+            ->whereIn('state', [JobStatus::QUEUED, JobStatus::RUNNING])
+            ->get();
+
+        if ($rows->isEmpty()) {
+            return response()->json(['message' => 'Nothing is being processed for these recordings.'], 409);
+        }
+
+        $stopped = 0;
+        $unreachable = 0;
+        foreach ($rows as $row) {
+            try {
+                if ($this->clearcut->cancel((string) ($row->service_job_id ?? $row->service_analysis_id))) {
+                    $row->update(['state' => JobStatus::CANCELLED, 'claimed_at' => null, 'finished_at' => now()]);
+                    $stopped++;
+                }
+            } catch (ClearcutRequestException $e) {
+                if ($e->isNotFound()) {
+                    $row->markLost();
+                }
+            } catch (ClearcutUnavailableException) {
+                $unreachable++;
+            }
+        }
+
+        $this->log()->info('clearcut.cancel', [
+            'rows' => $rows->count(),
+            'stopped' => $stopped,
+            'unreachable' => $unreachable,
+            'user' => $request->user()?->getAuthIdentifier(),
+        ]);
+
+        if ($unreachable > 0 && $stopped === 0) {
+            return response()->json(['message' => 'The processing service could not be reached. Try again.'], 503);
+        }
+
+        return response()->json(['cancelled' => $stopped, 'requested' => $rows->count()]);
+    }
+
+    /**
+     * The rows of these recordings.
+     *
+     * @param  Collection<int, Model>  $recordings
+     */
+    private function rowsOf(Collection $recordings)
+    {
+        return ClearcutJob::query()
+            ->where('subject_type', (new ($this->files->model()))->getMorphClass())
+            ->whereIn('subject_id', $recordings->map(fn (Model $r) => $r->getKey()));
+    }
+
+    /**
+     * One recording's state: work under way, and the last finished encode.
+     *
+     * @param  Collection<int, ClearcutJob>  $rows
+     * @return array<string, mixed>
+     */
+    private static function fileState(Collection $rows): array
+    {
+        $active = $rows->filter(fn (ClearcutJob $r) => self::isResumable($r))->last();
+        $output = $rows->filter(fn (ClearcutJob $r) => $r->service_job_id !== null && $r->state === JobStatus::DONE)->last();
+        $latest = $rows->last();
+
+        return [
+            // running | review | done | failed | none
+            'state' => match (true) {
+                $active !== null => $active->awaitsReview() ? 'review' : 'running',
+                $output !== null => 'done',
+                $latest?->state === JobStatus::FAILED => 'failed',
+                default => 'none',
+            },
+            'redacted' => $output?->redacted,
+            'watermarked' => $output?->watermarked,
+            'regions' => $output?->regions,
+            'processed_at' => $output?->finished_at,
+            'error' => $latest?->state === JobStatus::FAILED ? $latest->error : null,
+        ];
+    }
+
+    /** Open, with the settings to resume it by. */
+    private static function isResumable(ClearcutJob $row): bool
+    {
+        return $row->settings !== null && $row->isOpen();
+    }
+
+    /**
+     * The latest run to resume: as a batch while the service still has it,
+     * otherwise as a single job.
+     *
+     * @param  Collection<int, ClearcutJob>  $rows
+     * @return array<string, mixed>|null
+     */
+    private function runToResume(Collection $rows): ?array
+    {
+        $latest = $rows->filter(fn (ClearcutJob $r) => self::isResumable($r))->last();
+        if ($latest === null) {
+            return null;
+        }
+
+        if ($latest->batch_id !== null) {
+            $batch = $rows->where('batch_id', $latest->batch_id);
+
+            // A review batch with a recording already sent to encode would
+            // offer it for review again; it resumes as a single job instead.
+            $resumable = empty($latest->settings['review'])
+                || $batch->every(fn (ClearcutJob $r) => $r->service_job_id === null);
+
+            if ($resumable && $this->serviceHasBatch($latest->batch_id)) {
+                return [
+                    'kind' => 'batch',
+                    'id' => $latest->batch_id,
+                    'phase' => $batch->contains(
+                        fn (ClearcutJob $r) => in_array($r->state, [JobStatus::QUEUED, JobStatus::RUNNING], true)
+                    ) ? 'running' : 'review',
+                    'settings' => $latest->settings,
+                    'video_ids' => $batch->pluck('subject_id')->values(),
+                ];
+            }
+        }
+
+        return [
+            'kind' => 'job',
+            'id' => (string) $latest->id,
+            'phase' => $latest->awaitsReview() ? 'review' : 'running',
+            // An encode after review is watched, not reviewed again.
+            'settings' => ['review' => $latest->service_job_id === null] + $latest->settings,
+            'video_ids' => [$latest->subject_id],
+        ];
+    }
+
+    private function serviceHasBatch(string $batchId): bool
+    {
+        try {
+            $this->clearcut->batch($batchId);
+
+            return true;
+        } catch (ClearcutRequestException|ClearcutUnavailableException) {
+            return false;
+        }
+    }
+
+    /** Ask a running job to stop. Safe at any point: nothing half-written is kept. */
     public function cancel(ClearcutJob $record): JsonResponse
     {
         $serviceJobId = $record->service_job_id ?? $record->service_analysis_id;
@@ -400,39 +722,27 @@ class RecordingReviewController extends Controller
             ]);
         }
 
-        // False means it had already finished — a race between the cancel and
-        // the work, not an error.
+        // False: it had already finished.
         return response()->json(['cancelled' => $stopped]);
     }
 
     /**
-     * A short-lived URL the browser can play.
-     *
-     * Adapt to wherever the recording lives. The important part is that this
-     * is signed and expires: the review screen holds it for as long as the tab
-     * is open, and it points at a recording full of personal data. A permanent
-     * link, or a public object, is how that leaks.
+     * A URL the player can load: signed and short-lived where the disk can
+     * sign (S3, a served local disk), its plain URL otherwise.
      */
-    public function videoUrl(ClearcutJob $record): JsonResponse
+    public function videoUrl(string $recording): JsonResponse
     {
-        // Replace with your own storage disk. For S3:
-        //
-        //   $url = Storage::disk('s3')->temporaryUrl(
-        //       $record->source_key,
-        //       now()->addMinutes(30),
-        //   );
-        //
-        // Returning the key alone would be useless to a browser, and returning
-        // a permanent URL would outlive the review.
-        return response()->json([
-            'url' => null,
-            'message' => 'Implement videoUrl() against your storage disk',
-        ], 501);
+        $path = $this->files->pathOf($this->files->findRecording($recording));
+        $disk = Storage::disk(config('clearcut.recordings.disk', 'public'));
+
+        $url = $disk->providesTemporaryUrls()
+            ? $disk->temporaryUrl($path, now()->addMinutes(30))
+            : url($disk->url($path));
+
+        return response()->json(['url' => $url]);
     }
 
-    /**
-     * The proposed regions, for the review screen.
-     */
+    /** The proposed regions, for the review screen. */
     public function proposal(ClearcutJob $record): JsonResponse
     {
         if ($record->service_analysis_id === null) {
@@ -442,8 +752,7 @@ class RecordingReviewController extends Controller
         try {
             $proposal = $this->clearcut->proposal($record->service_analysis_id);
         } catch (ClearcutRequestException $e) {
-            // A proposal expires after a week. The panel should offer to
-            // re-analyse rather than show an error with no way forward.
+            // A proposal expires after a week.
             return response()->json(['message' => $e->getMessage()], $e->status);
         }
 
@@ -454,16 +763,35 @@ class RecordingReviewController extends Controller
             'counts' => $proposal->counts(),
             'fully_reviewed' => $proposal->fullyReviewed(),
             'regions' => array_map(self::regionPayload(...), $proposal->regions),
-            // Surfaced, not hidden: these are regions the service could not
-            // resolve and refused to guess at, so the reviewer should know
-            // something on this recording is uncovered.
+            // Regions the service could not resolve: left uncovered.
             'rejected' => $proposal->rejected,
         ]);
     }
 
-    /**
-     * Record keep/drop verdicts as the reviewer makes them.
-     */
+    /** Throw away a proposal. The row stays, marked cancelled. */
+    public function discardProposal(ClearcutJob $record): JsonResponse
+    {
+        if ($record->service_analysis_id === null) {
+            return response()->json(['message' => 'No analysis was started'], 409);
+        }
+
+        try {
+            $this->clearcut->discardProposal($record->service_analysis_id);
+        } catch (ClearcutRequestException $e) {
+            // Already gone is the outcome asked for.
+            if (! $e->isNotFound()) {
+                return response()->json(['message' => $e->getMessage()], $e->status);
+            }
+        } catch (ClearcutUnavailableException $e) {
+            return response()->json(['message' => $e->getMessage()], 503);
+        }
+
+        $record->update(['state' => 'cancelled', 'claimed_at' => null, 'finished_at' => now()]);
+
+        return response()->json(null, 204);
+    }
+
+    /** Record keep/drop verdicts as they are made. */
     public function decide(Request $request, ClearcutJob $record): JsonResponse
     {
         $validated = $request->validate([
@@ -484,9 +812,7 @@ class RecordingReviewController extends Controller
         }
     }
 
-    /**
-     * Add a box the reviewer drew on the frame.
-     */
+    /** Add a box the reviewer drew. */
     public function addRegion(Request $request, ClearcutJob $record): JsonResponse
     {
         $validated = $request->validate([
@@ -511,24 +837,17 @@ class RecordingReviewController extends Controller
                 isset($validated['t1']) ? (float) $validated['t1'] : null,
             );
         } catch (ClearcutRequestException $e) {
-            // 422 when the box does not fit the frame; passed through so the
-            // screen can put the drawn box back rather than show it as saved.
+            // 422 when the box does not fit the frame.
             return response()->json(['message' => $e->getMessage()], $e->status);
         }
-
-        // Record who drew it, in your own audit trail — the service's audit
-        // says a reviewer did, not which one.
 
         return response()->json(self::regionReply($reply), 201);
     }
 
-    /**
-     * Reshape or retime one region.
-     */
+    /** Reshape or retime one region. */
     public function editRegion(Request $request, ClearcutJob $record): JsonResponse
     {
-        // `sometimes`, so a field left out stays out: absence means "keep",
-        // while an explicit null time means "the whole recording".
+        // Absent keys are kept; an explicit null time means the whole recording.
         $validated = $request->validate([
             'name' => 'required|string|max:256',
             'x' => 'sometimes|integer|min:0',
@@ -581,18 +900,14 @@ class RecordingReviewController extends Controller
             'decision' => $region->decision,
             'source' => $region->source,
             'reason' => $region->reason,
-            // The detector's box, once a reviewer has changed it — so the
-            // screen can show what was found beside what will be covered.
+            // The detector's box, once a reviewer changed it.
             'original' => $region->original,
-            // A field that scrolled is drawn as these; the box above is only
-            // their outline, and drawing it shows far more than is covered.
+            // Per-segment boxes of a scrolling field; the box above is their outline.
             'segments' => $region->segments,
         ];
     }
 
-    /**
-     * Encode what the reviewer kept.
-     */
+    /** Encode what the reviewer kept. */
     public function apply(Request $request, ClearcutJob $record): JsonResponse
     {
         $validated = $request->validate([
@@ -602,12 +917,20 @@ class RecordingReviewController extends Controller
             'mark_size' => 'nullable|in:large,medium,small',
             'mark_speed' => 'nullable|numeric|between:0.25,2',
             'allow_undecided' => 'boolean',
-            // "local" writes nothing to S3; see output() below.
             'output_destination' => 'nullable|in:s3,local',
         ]);
 
         if ($record->service_analysis_id === null) {
             return response()->json(['message' => 'No analysis was started'], 409);
+        }
+
+        if (! config('clearcut.enabled', true)) {
+            return response()->json(['message' => 'Video processing is switched off (CLEARCUT_ENABLED).'], 422);
+        }
+
+        $recording = $this->files->model()::find($record->subject_id);
+        if ($recording !== null && ($reason = $this->refusalFor($recording, $validated['mark_type'])) !== null) {
+            return response()->json(['message' => "Recording {$recording->getKey()} {$reason}."], 422);
         }
 
         try {
@@ -622,9 +945,7 @@ class RecordingReviewController extends Controller
                 markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
             );
         } catch (ClearcutRequestException $e) {
-            // A 409 means regions are still undecided and would not be
-            // covered. Passed through as-is so the panel can offer to go back,
-            // rather than presenting it as a generic failure.
+            // 409: regions still undecided, and would not be covered.
             return response()->json(['message' => $e->getMessage()], $e->status);
         }
 
@@ -632,19 +953,19 @@ class RecordingReviewController extends Controller
             'service_job_id' => $status->jobId,
             'state' => $status->state,
             'reviewed_by_human' => true,
+            // The reviewer's final choices over those the analysis started with.
+            'settings' => array_intersect_key($validated, array_flip([
+                'redaction_style', 'brand', 'mark_type', 'mark_size', 'mark_speed', 'output_destination',
+            ])) + ['review' => false] + ($record->settings ?? []),
         ]);
 
-        return response()->json($status->toArray(), 202);
+        dispatch(WatchClearcutJob::forRow($record->id));
+
+        // The row id, as every route here takes it.
+        return response()->json(['id' => $record->id] + $status->toArray(), 202);
     }
 
-    /**
-     * A finished local output, streamed from the service to the browser.
-     *
-     * Local outputs are never in S3: the service holds the file until it is
-     * released, and this is the only way to it — the browser cannot reach the
-     * service (rule 6). Streamed through rather than buffered, since a
-     * recording is hundreds of megabytes.
-     */
+    /** Stream a local output from the service to the browser. */
     public function output(ClearcutJob $record): mixed
     {
         if ($record->service_job_id === null) {
@@ -667,20 +988,15 @@ class RecordingReviewController extends Controller
             }
         }, 200, [
             'Content-Type' => 'video/mp4',
-            // Length and checksum are what let the browser confirm a complete
-            // save before it asks for the release.
+            // Size and checksum let the browser confirm a complete save.
             'Content-Length' => (string) $output['size'],
             'X-Content-SHA256' => $output['sha256'],
-            // Name it after your own record rather than the service's id, so
-            // the file on the reviewer's disk says what it is.
             'Content-Disposition' => 'attachment; filename="'.$output['filename'].'"',
             'Cache-Control' => 'no-store',
         ]);
     }
 
-    /**
-     * The audit file for a local output, saved beside the video.
-     */
+    /** The audit file of a local output. */
     public function outputAudit(ClearcutJob $record): JsonResponse
     {
         if ($record->service_job_id === null) {
@@ -696,12 +1012,7 @@ class RecordingReviewController extends Controller
         }
     }
 
-    /**
-     * Delete a local output on the service once the browser has saved it.
-     *
-     * Irreversible — the service holds the only copy — which is why the panel
-     * calls this only after the file is written and its size matched.
-     */
+    /** Delete a local output on the service once the browser saved it. Irreversible. */
     public function releaseOutput(ClearcutJob $record): JsonResponse
     {
         if ($record->service_job_id === null) {
@@ -714,9 +1025,11 @@ class RecordingReviewController extends Controller
             return response()->json(['message' => $e->getMessage()], 503);
         }
 
-        // Record who saved it, in your own audit trail: the service knows only
-        // that a release was asked for.
-
         return response()->json(['released' => $released]);
+    }
+
+    private function log(): \Psr\Log\LoggerInterface
+    {
+        return Log::channel(config('clearcut.log_channel'));
     }
 }

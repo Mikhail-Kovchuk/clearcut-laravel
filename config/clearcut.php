@@ -56,4 +56,67 @@ return [
      | making progress.
      */
     'max_job_seconds' => (int) env('CLEARCUT_MAX_JOB_SECONDS', 3600),
+
+    /*
+     | Off refuses every new run; running ones and their results are untouched.
+     */
+    'enabled' => (bool) env('CLEARCUT_ENABLED', true),
+
+    /*
+     | Seconds between polls of WatchClearcutJob, the queued job that follows
+     | a run with the page closed. At least 5.
+     */
+    'watch_interval' => (int) env('CLEARCUT_WATCH_INTERVAL', 30),
+
+    /*
+     | Log channel for the examples' lines; null is the default channel.
+     */
+    'log_channel' => env('CLEARCUT_LOG_CHANNEL'),
+
+    /*
+     | The application's recordings.
+     |
+     | model: the Eloquent model whose primary key the routes take as
+     |        {recording} and `video_ids`.
+     | disk:  where the recordings are, for playback.
+     | path:  the attribute holding a recording's path on that disk.
+     | source_key: the attribute the service reads from, when it is not
+     |        `path` (an S3 key, say). Unused with replace_original on.
+     */
+    'recordings' => [
+        'model' => 'App\\Models\\Recording',
+        'disk' => env('CLEARCUT_RECORDINGS_DISK', 'public'),
+        'path' => 'path',
+        'source_key' => null,
+    ],
+
+    /*
+     | Put the finished video in place of the recording.
+     |
+     | Off: the output stays where the service wrote it (`output_key`), and the
+     | recording is untouched.
+     |
+     | On: before its first run `name.mp4` is copied to `name_org.mp4` on the
+     | private disk, and the service reads only that copy. A finished encode is
+     | checked against its audit and moved beside the recording as
+     | `name_r.mp4` / `name_w.mp4` / `name_rw.mp4` (redacted, watermarked,
+     | both); `path` points at it and the public original is deleted. Later
+     | runs start from `_org` again, so nothing is processed twice.
+     |
+     | Needs local disks, the service on filesystem storage with
+     | CLEARCUT_STORAGE_ROOT at the private disk's root, and a nullable string
+     | column for `original_path` on the recordings table.
+     |
+     | delete_originals: ClearcutFiles::deleteOriginals() deletes the `_org`
+     | copies, which the application calls when a recording is final (an order
+     | closed, say). After that a recording can no longer be processed.
+     */
+    'replace_original' => [
+        'enabled' => (bool) env('CLEARCUT_REPLACE_ORIGINAL', false),
+        'private_disk' => env('CLEARCUT_PRIVATE_DISK', 'local'),
+        'original_path' => 'original_path',
+        // Attribute updated with the new file size; null leaves it alone.
+        'size' => null,
+        'delete_originals' => (bool) env('CLEARCUT_DELETE_ORIGINALS', false),
+    ],
 ];

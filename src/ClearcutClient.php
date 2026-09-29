@@ -291,7 +291,11 @@ class ClearcutClient
     /**
      * What a settings form needs to offer the output choice.
      *
-     * @return array{output_destination: string, output_retention_seconds: int}
+     * `storage` is what the "s3" destination writes to: "s3", or "filesystem"
+     * for a service storing on its own disk. Absent from a service older than
+     * the filesystem backend.
+     *
+     * @return array{output_destination: string, output_retention_seconds: int, storage?: string}
      */
     public function settings(): array
     {

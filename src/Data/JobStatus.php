@@ -37,6 +37,8 @@ final class JobStatus
      * @param  string|null  $outputDestination  'local' when the output waits on the service for download
      * @param  int|null  $outputSize  bytes of a local output
      * @param  int|null  $outputExpiresAt  unix time a local output is deleted if nobody fetches it
+     * @param  bool|null  $redacted  whether a finished encode ran the redaction pass; null until one has
+     * @param  bool|null  $watermarked  whether a finished encode burned in a mark; null until one has
      */
     public function __construct(
         public readonly string $jobId,
@@ -59,6 +61,8 @@ final class JobStatus
         public readonly ?string $outputDestination = null,
         public readonly ?int $outputSize = null,
         public readonly ?int $outputExpiresAt = null,
+        public readonly ?bool $redacted = null,
+        public readonly ?bool $watermarked = null,
     ) {
     }
 
@@ -94,6 +98,11 @@ final class JobStatus
             outputDestination: $data['output_destination'] ?? null,
             outputSize: isset($data['output_size']) ? (int) $data['output_size'] : null,
             outputExpiresAt: isset($data['output_expires_at']) ? (int) $data['output_expires_at'] : null,
+            // Null, not false, when absent: an analysis, a running encode or an
+            // older service says nothing about the passes, and false would
+            // claim a recording was left unredacted.
+            redacted: isset($data['redacted']) ? (bool) $data['redacted'] : null,
+            watermarked: isset($data['watermarked']) ? (bool) $data['watermarked'] : null,
         );
     }
 
@@ -164,6 +173,8 @@ final class JobStatus
             'output_destination' => $this->outputDestination,
             'output_size' => $this->outputSize,
             'output_expires_at' => $this->outputExpiresAt,
+            'redacted' => $this->redacted,
+            'watermarked' => $this->watermarked,
         ], static fn ($value) => $value !== null);
     }
 }
