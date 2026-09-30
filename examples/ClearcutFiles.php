@@ -75,6 +75,7 @@ class ClearcutFiles
                     'The original of this recording was deleted, so it cannot be processed again.'
                 );
             }
+            $this->shareWithService($original);
 
             return $original;
         }
@@ -82,6 +83,8 @@ class ClearcutFiles
         $path = $this->pathOf($recording);
         $key = self::orgPath($path);
         if ($this->private()->exists($key)) {
+            $this->shareWithService($key);
+
             return $key;
         }
 
@@ -117,7 +120,30 @@ class ClearcutFiles
             'elapsed' => round(microtime(true) - $started, 1),
         ]);
 
+        $this->shareWithService($key);
+
         return $key;
+    }
+
+    /**
+     * Group read on the original and group entry to every folder above it, up
+     * to the disk root. Laravel makes private folders 0700, and a service on
+     * this machine reads as a member of the web server's group; others get
+     * nothing.
+     */
+    private function shareWithService(string $key): void
+    {
+        $root = rtrim($this->private()->path(''), '/\\');
+        $path = $this->private()->path($key);
+
+        $shared = @chmod($path, (fileperms($path) & 0777) | 0040);
+        for ($dir = dirname($path); strlen($dir) > strlen($root); $dir = dirname($dir)) {
+            $shared = @chmod($dir, (fileperms($dir) & 0777) | 0050) && $shared;
+        }
+
+        if (! $shared) {
+            $this->log()->warning('clearcut.original_unshared', ['key' => $key]);
+        }
     }
 
     /**
