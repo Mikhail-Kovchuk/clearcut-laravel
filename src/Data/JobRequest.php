@@ -36,7 +36,7 @@ final class JobRequest
 
     public const MARK_NONE = 'none';
 
-    /** The size the PHP watermark service draws, and the default. */
+    /** The default size. */
     public const SIZE_LARGE = 'large';
 
     public const SIZE_MEDIUM = 'medium';

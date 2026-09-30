@@ -122,11 +122,9 @@ return new class extends Migration
             $table->unsignedSmallInteger('rejected_regions')->default(0);
 
             // Whether a human actually went through the proposal. Set from
-            // what happened, never from which code path ran: the tool this
-            // was ported from hardcoded it true, which was harmless only
-            // while exporting without review was impossible. With an
-            // automatic path it would be a false claim in the one record
-            // meant to be trustworthy.
+            // what happened, never from which code path ran: with an
+            // automatic path, a value fixed at true would be a false claim in
+            // the one record meant to be trustworthy.
             $table->boolean('reviewed_by_human')->default(false);
 
             // Last failure, so a UI can say why something is unprocessed
