@@ -24,7 +24,7 @@ final class JobStatus
     public const CANCELLED = 'cancelled';
 
     /**
-     * @param  string  $stage  which step is running: downloading, detecting, encoding, uploading
+     * @param  string  $stage  which step is running: downloading, sampling, detecting, encoding, uploading
      * @param  float  $progress  0..1 within the current stage, not overall
      * @param  int|null  $regions  how many were covered, once known
      * @param  int  $rejectedRegions  proposed but outside the frame, and therefore not covered
@@ -39,6 +39,7 @@ final class JobStatus
      * @param  int|null  $outputExpiresAt  unix time a local output is deleted if nobody fetches it
      * @param  bool|null  $redacted  whether a finished encode ran the redaction pass; null until one has
      * @param  bool|null  $watermarked  whether a finished encode burned in a mark; null until one has
+     * @param  int|null  $elapsed  seconds since work began, by the service's clock; null while queued
      */
     public function __construct(
         public readonly string $jobId,
@@ -63,6 +64,7 @@ final class JobStatus
         public readonly ?int $outputExpiresAt = null,
         public readonly ?bool $redacted = null,
         public readonly ?bool $watermarked = null,
+        public readonly ?int $elapsed = null,
     ) {
     }
 
@@ -103,6 +105,7 @@ final class JobStatus
             // claim a recording was left unredacted.
             redacted: isset($data['redacted']) ? (bool) $data['redacted'] : null,
             watermarked: isset($data['watermarked']) ? (bool) $data['watermarked'] : null,
+            elapsed: isset($data['elapsed']) ? (int) $data['elapsed'] : null,
         );
     }
 
@@ -175,6 +178,7 @@ final class JobStatus
             'output_expires_at' => $this->outputExpiresAt,
             'redacted' => $this->redacted,
             'watermarked' => $this->watermarked,
+            'elapsed' => $this->elapsed,
         ], static fn ($value) => $value !== null);
     }
 }
