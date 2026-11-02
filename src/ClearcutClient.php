@@ -12,9 +12,11 @@ use Clearcut\Video\Data\DetectionProfile;
 use Clearcut\Video\Data\JobRequest;
 use Clearcut\Video\Data\JobStatus;
 use Clearcut\Video\Data\ProposedRegion;
+use Clearcut\Video\Data\Upload;
 use Clearcut\Video\Exceptions\ClearcutException;
 use Clearcut\Video\Exceptions\ClearcutRequestException;
 use Clearcut\Video\Exceptions\ClearcutUnavailableException;
+use GuzzleHttp\Psr7\Utils;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory as HttpFactory;
 use Illuminate\Http\Client\Response;
@@ -254,6 +256,11 @@ class ClearcutClient
      * half-reviewed proposal unless `allowUndecided` is set, because doing so
      * silently exports a video missing the boxes nobody reached — which looks
      * exactly like a correct export.
+     *
+     * `$cuts` replaces the analysis' cut: null leaves it as the analysis had
+     * it, `[]` cuts nothing, a list cuts that.
+     *
+     * @param  array<int, array{t0: float, t1: float}>|null  $cuts
      */
     public function apply(
         string $jobId,
@@ -264,6 +271,7 @@ class ClearcutClient
         ?string $outputDestination = null,
         string $markSize = 'large',
         float $markSpeed = 1.0,
+        ?array $cuts = null,
     ): JobStatus {
         $payload = [
             'redaction_style' => $redactionStyle,
@@ -275,6 +283,11 @@ class ClearcutClient
         ];
         if ($outputDestination !== null) {
             $payload['output_destination'] = $outputDestination;
+        }
+        // Sent only when given: absent keeps the analysis' cut, and the
+        // service tells absent from null by whether the key is there.
+        if ($cuts !== null) {
+            $payload['cuts'] = $cuts === [] ? null : JobRequest::spans($cuts);
         }
 
         return JobStatus::fromArray($this->send('POST', "/review/{$jobId}/apply", $payload));
@@ -295,7 +308,10 @@ class ClearcutClient
      * for a service storing on its own disk. Absent from a service older than
      * the filesystem backend.
      *
-     * @return array{output_destination: string, output_retention_seconds: int, storage?: string}
+     * `upload_max_bytes` and `upload_chunk_bytes` are absent from a service
+     * older than uploads.
+     *
+     * @return array{output_destination: string, output_retention_seconds: int, storage?: string, upload_max_bytes?: int, upload_chunk_bytes?: int}
      */
     public function settings(): array
     {
@@ -373,6 +389,169 @@ class ClearcutClient
     {
         try {
             $this->send('DELETE', "/jobs/{$jobId}/output");
+
+            return true;
+        } catch (ClearcutRequestException $e) {
+            if ($e->isNotFound()) {
+                return false;
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * Announce a recording about to be sent from someone's computer.
+     *
+     * Refused (413, 409, 507) before a byte is sent when it could never be
+     * accepted — too large, too many uploads pending, no room on the service.
+     * The reply's `chunkSize` is the largest chunk the service takes.
+     */
+    public function createUpload(string $filename, int $size): Upload
+    {
+        return Upload::fromArray($this->send('POST', '/uploads', [
+            'filename' => $filename,
+            'size' => $size,
+        ]));
+    }
+
+    /**
+     * Append one chunk at `$offset`, which must be where the upload ends.
+     *
+     * Passed through as a stream: the application relays the bytes, it does
+     * not hold them. Not retried here — a body already read cannot be sent
+     * again — so the browser retries, and the service takes a repeated last
+     * chunk as delivered.
+     *
+     * A wrong offset is a 409 whose `body['received']` says where to resume.
+     *
+     * @param  StreamInterface|resource|string  $chunk
+     */
+    public function uploadChunk(string $uploadId, int $offset, mixed $chunk, int $timeout = 120): Upload
+    {
+        $path = "/uploads/{$uploadId}?offset={$offset}";
+
+        try {
+            $response = $this->http
+                ->withToken($this->token)
+                ->timeout($timeout)
+                ->withBody(Utils::streamFor($chunk), 'application/octet-stream')
+                ->put($this->url($path));
+        } catch (ConnectionException $e) {
+            throw new ClearcutUnavailableException(
+                "clearcut-video is unreachable at {$this->baseUrl}: {$e->getMessage()}",
+                previous: $e,
+            );
+        }
+
+        if ($response->failed()) {
+            throw new ClearcutRequestException(
+                $this->describeFailure($response, 'PUT', "/uploads/{$uploadId}"),
+                $response->status(),
+                $response->json() ?? [],
+            );
+        }
+
+        return Upload::fromArray($response->json() ?? []);
+    }
+
+    /**
+     * Check a fully received upload and make it readable by jobs.
+     *
+     * The service hashes and probes the whole file, which takes seconds on a
+     * large one — hence the longer timeout. A refusal (422) means it deleted
+     * the upload: no chunk resent could repair it.
+     */
+    public function completeUpload(string $uploadId, ?string $sha256 = null, int $timeout = 300): Upload
+    {
+        $path = "/uploads/{$uploadId}/complete";
+
+        try {
+            $response = $this->http
+                ->withToken($this->token)
+                ->timeout($timeout)
+                ->post($this->url($path), $sha256 !== null ? ['sha256' => $sha256] : (object) []);
+        } catch (ConnectionException $e) {
+            throw new ClearcutUnavailableException(
+                "clearcut-video is unreachable at {$this->baseUrl}: {$e->getMessage()}",
+                previous: $e,
+            );
+        }
+
+        if ($response->failed()) {
+            throw new ClearcutRequestException(
+                $this->describeFailure($response, 'POST', $path),
+                $response->status(),
+                $response->json() ?? [],
+            );
+        }
+
+        return Upload::fromArray($response->json() ?? []);
+    }
+
+    /** How much of an upload has arrived, and its state. */
+    public function upload(string $uploadId): Upload
+    {
+        return Upload::fromArray($this->send('GET', "/uploads/{$uploadId}"));
+    }
+
+    /**
+     * A complete upload's recording, for a reviewer's player.
+     *
+     * `$range` is the browser's Range header, passed through so the player can
+     * seek; the reply's status (200 or 206) and headers go back to it as they
+     * came.
+     *
+     * @return array{stream: StreamInterface, status: int, headers: array<string, string>}
+     */
+    public function streamUploadVideo(string $uploadId, ?string $range = null, int $timeout = 600): array
+    {
+        $path = "/uploads/{$uploadId}/video";
+
+        try {
+            $response = $this->http
+                ->withToken($this->token)
+                ->timeout($timeout)
+                ->withHeaders($range !== null ? ['Range' => $range] : [])
+                ->withOptions(['stream' => true])
+                ->get($this->url($path));
+        } catch (ConnectionException $e) {
+            throw new ClearcutUnavailableException(
+                "clearcut-video is unreachable at {$this->baseUrl}: {$e->getMessage()}",
+                previous: $e,
+            );
+        }
+
+        if ($response->failed()) {
+            throw new ClearcutRequestException(
+                $this->describeFailure($response, 'GET', $path),
+                $response->status(),
+                $response->json() ?? [],
+            );
+        }
+
+        $headers = [];
+        foreach (['Content-Type', 'Content-Length', 'Content-Range', 'Accept-Ranges'] as $name) {
+            if ($response->header($name) !== '') {
+                $headers[$name] = $response->header($name);
+            }
+        }
+
+        return [
+            'stream' => $response->toPsrResponse()->getBody(),
+            'status' => $response->status(),
+            'headers' => $headers,
+        ];
+    }
+
+    /**
+     * Delete an upload, in any state. Irreversible: on the server the
+     * recording exists nowhere else. False if there was none any more.
+     */
+    public function deleteUpload(string $uploadId): bool
+    {
+        try {
+            $this->send('DELETE', "/uploads/{$uploadId}");
 
             return true;
         } catch (ClearcutRequestException $e) {

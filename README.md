@@ -232,7 +232,42 @@ php artisan clearcut:sync                                 # settle what a stoppe
 php artisan clearcut:sync --minutes=30 --clean-temp       # worth scheduling
 ```
 
-### 5. Optional: replacing the original
+### 5. Optional: recordings from the user's computer
+
+`UploadController` processes a file the user picks on their own machine and
+saves the result back onto it — nothing of it enters the application's
+storage. The browser sends the file in chunks; this application relays each
+one to the service, which holds the recording while it is processed.
+
+| Route | |
+|---|---|
+| `POST uploads` `{filename, size, mode, review, …settings}` | a row (`state: uploading`) and `chunk_size`; the settings its job will run with |
+| `PUT uploads/{id}/chunk?offset=N` | raw bytes, not a form; a wrong offset is `409` with `received` |
+| `POST uploads/{id}/complete` `{sha256?}` | the service checks the file, then the job starts — `process`, or `analyze` with `review` |
+| `GET uploads` · `GET uploads/{id}` | the user's uploads; one still arriving reports `received`, to resume from |
+| `DELETE uploads/{id}` | stop its work, delete the recording and any unsaved result on the service |
+| `GET uploads/{id}/url` | a 30-minute signed URL for the review player |
+
+From `complete` on, the row is a run like any other: polled, reviewed and
+saved through `recordings/jobs/{id}/…`. The output is always local — the
+service refuses anything else for an upload — and is named after the picked
+file (`Registration_rw.mp4`). Releasing it after the save stamps `saved_at`
+and deletes the recording on the service.
+
+Each user sees only their own uploads. Three things to set up:
+
+- **The chunk size.** `CLEARCUT_UPLOAD_CHUNK_LIMIT` (default `8MB`) is the
+  largest body your web server takes; the chunk used is the smaller of it and
+  the service's. nginx allows 1 MB unless `client_max_body_size` is raised.
+  PHP's `post_max_size` does not apply: a chunk is a PUT body, not a form.
+- **The player's route.** `uploads/{id}/video` is signed, not authenticated —
+  a `<video>` element cannot send a bearer token. With `routes/clearcut.php`
+  loaded inside an authenticated group, register that one route outside it.
+- **The columns.** `source_name` and `saved_at`, from
+  `…_add_upload_columns_to_clearcut_jobs_table.php`, which `clearcut:install`
+  publishes for a table created before uploads.
+
+### 6. Optional: replacing the original
 
 By default the service writes its output beside the original, under its own
 `processed/` prefix, and the recording is untouched: `output_key` on the row

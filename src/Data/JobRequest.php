@@ -63,6 +63,8 @@ final class JobRequest
      * @param  string|null  $outputDestination  s3 | local; null leaves it to the service's default
      * @param  string  $markSize  large | medium | small — the logo or text, not the frame
      * @param  float  $markSpeed  a multiple of the standard travel speed, 0.25 to 2.0
+     * @param  array<int, array{t0: float, t1: float}>|null  $ranges  fragments to look in, seconds; null for the whole recording
+     * @param  array<int, array{t0: float, t1: float}>|null  $cuts  what to cut out, seconds; a pass of its own — a job may only cut
      */
     public function __construct(
         public readonly string $videoId,
@@ -79,7 +81,26 @@ final class JobRequest
         public readonly ?string $outputDestination = null,
         public readonly string $markSize = self::SIZE_LARGE,
         public readonly float $markSpeed = 1.0,
+        public readonly ?array $ranges = null,
+        public readonly ?array $cuts = null,
     ) {
+        // An empty list is not "the whole recording" or "cut nothing": a
+        // caller who chose no fragment chose nothing, and the service refuses
+        // it for that reason.
+        foreach (['ranges' => $ranges, 'cuts' => $cuts] as $name => $list) {
+            if ($list === null) {
+                continue;
+            }
+            if ($list === []) {
+                throw new InvalidArgumentException("{$name} is empty; pass null instead");
+            }
+            foreach ($list as $range) {
+                if (! isset($range['t0'], $range['t1']) || $range['t1'] <= $range['t0']) {
+                    throw new InvalidArgumentException("Every entry of {$name} needs t0 < t1, in seconds");
+                }
+            }
+        }
+
         if ($videoId === '' || $sourceKey === '') {
             throw new InvalidArgumentException('videoId and sourceKey are required');
         }
@@ -108,11 +129,11 @@ final class JobRequest
             );
         }
 
-        // Neither redacting nor watermarking would re-encode the recording
-        // into a copy identical but for a generation of h264 loss.
-        if ($mode === self::MODE_NONE && $markType === self::MARK_NONE) {
+        // Neither redacting, watermarking nor cutting would re-encode the
+        // recording into a copy identical but for a generation of h264 loss.
+        if ($mode === self::MODE_NONE && $markType === self::MARK_NONE && $cuts === null) {
             throw new InvalidArgumentException(
-                'nothing to do: mode=none skips redaction and markType=none skips the watermark'
+                'nothing to do: mode=none skips redaction, markType=none skips the watermark, and nothing is cut'
             );
         }
     }
@@ -144,6 +165,12 @@ final class JobRequest
             $payload['output_destination'] = $this->outputDestination;
         }
 
+        foreach (['ranges' => $this->ranges, 'cuts' => $this->cuts] as $name => $list) {
+            if ($list !== null) {
+                $payload[$name] = self::spans($list);
+            }
+        }
+
         // Overrides are merged at the top level, and only the keys actually
         // given: the service treats an absent field as "keep the profile's
         // value", so sending nulls would overwrite the profile being refined.
@@ -154,5 +181,19 @@ final class JobRequest
         }
 
         return $payload;
+    }
+
+    /**
+     * Stretches of a recording as the service takes them.
+     *
+     * @param  array<int, array{t0: float|int|string, t1: float|int|string}>  $spans
+     * @return array<int, array{t0: float, t1: float}>
+     */
+    public static function spans(array $spans): array
+    {
+        return array_map(
+            static fn (array $r) => ['t0' => (float) $r['t0'], 't1' => (float) $r['t1']],
+            array_values($spans),
+        );
     }
 }

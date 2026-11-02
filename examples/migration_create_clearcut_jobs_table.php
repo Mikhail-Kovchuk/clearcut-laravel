@@ -47,6 +47,12 @@ return new class extends Migration
             // once the subject row changes.
             $table->string('source_key', 1024);
 
+            // The file's name as the person picked it, for a recording sent
+            // from their computer (`subject_type` 'upload', source key
+            // `upload:<id>`). Nothing else holds it: the service keeps the
+            // upload under its id, and the subject columns are empty.
+            $table->string('source_name')->nullable();
+
             // The service's own ids. Two, because an analysis and the encode
             // that follows it are separate jobs: the review flow fetches the
             // proposal by the analysis id hours after it finished, while the
@@ -112,6 +118,12 @@ return new class extends Migration
             // conditional UPDATE, like the claim, so two polls arriving
             // together cannot place one encode twice.
             $table->timestamp('placed_at')->nullable();
+
+            // When a local output was saved on the reviewer's computer and
+            // released on the service. Not `placed_at`: nothing in the
+            // application changed, and a recording marked placed would claim
+            // it now shows the processed file.
+            $table->timestamp('saved_at')->nullable();
 
             // How many regions were covered, and how many were proposed but
             // could not be resolved. The second is not decoration: a rejected

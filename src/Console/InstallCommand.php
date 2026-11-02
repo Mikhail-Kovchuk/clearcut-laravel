@@ -33,6 +33,9 @@ class InstallCommand extends Command
         $this->publish('clearcut-models', app_path('Models/ClearcutJob.php'), 'app/Models/ClearcutJob.php');
         $this->publishMigration($files);
         $this->publish('clearcut-controllers', app_path('Http/Controllers/RecordingReviewController.php'), 'app/Http/Controllers/RecordingReviewController.php');
+        // Its own check: an install from before uploads keeps its review
+        // controller and still needs this one.
+        $this->publish('clearcut-upload-controller', app_path('Http/Controllers/UploadController.php'), 'app/Http/Controllers/UploadController.php');
         $this->publish('clearcut-routes', base_path('routes/clearcut.php'), 'routes/clearcut.php');
         $this->publish('clearcut-services', app_path('Services/ClearcutFiles.php'), 'app/Services/ClearcutFiles.php');
         $this->publish('clearcut-jobs', app_path('Jobs/WatchClearcutJob.php'), 'app/Jobs/WatchClearcutJob.php');
@@ -81,16 +84,24 @@ class InstallCommand extends Command
                 '<fg=yellow>exists, kept</>',
             );
 
+            // A table from before uploads still needs their columns.
+            if ($files->glob(database_path('migrations/*_add_upload_columns_to_clearcut_jobs_table.php')) === []) {
+                $this->callSilently('vendor:publish', ['--tag' => 'clearcut-migrations-uploads']);
+                $this->components->twoColumnDetail('database/migrations/…_add_upload_columns_to_clearcut_jobs_table.php', '<fg=green>published</>');
+            }
+
             return;
         }
 
         $this->callSilently('vendor:publish', ['--tag' => 'clearcut-migrations']);
 
-        $published = $files->glob(database_path('migrations/*_create_clearcut_jobs_table.php'));
-        $this->components->twoColumnDetail(
-            'database/migrations/'.basename($published[0] ?? 'create_clearcut_jobs_table.php'),
-            '<fg=green>published</>',
-        );
+        foreach (['create_clearcut_jobs_table', 'add_upload_columns_to_clearcut_jobs_table'] as $name) {
+            $published = $files->glob(database_path("migrations/*_{$name}.php"));
+            $this->components->twoColumnDetail(
+                'database/migrations/'.basename($published[0] ?? "{$name}.php"),
+                '<fg=green>published</>',
+            );
+        }
     }
 
     /**

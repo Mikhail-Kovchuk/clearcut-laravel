@@ -67,7 +67,14 @@ class ClearcutServiceProvider extends ServiceProvider
             // the framework's own tables.
             $this->publishesMigrations([
                 __DIR__.'/../examples/migration_create_clearcut_jobs_table.php' => database_path('migrations/2026_01_01_000000_create_clearcut_jobs_table.php'),
+                __DIR__.'/../examples/migration_add_upload_columns_to_clearcut_jobs_table.php' => database_path('migrations/2026_11_01_000000_add_upload_columns_to_clearcut_jobs_table.php'),
             ], 'clearcut-migrations');
+
+            // The second on its own too, for a table created before uploads:
+            // publishing the whole tag again would add a second create.
+            $this->publishesMigrations([
+                __DIR__.'/../examples/migration_add_upload_columns_to_clearcut_jobs_table.php' => database_path('migrations/2026_11_01_000000_add_upload_columns_to_clearcut_jobs_table.php'),
+            ], 'clearcut-migrations-uploads');
 
             // The rest of the examples, same reasoning: once published they are
             // application code, and each has lines to adapt before it runs.
@@ -78,6 +85,10 @@ class ClearcutServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__.'/../examples/RecordingReviewController.php' => app_path('Http/Controllers/RecordingReviewController.php'),
             ], 'clearcut-controllers');
+
+            $this->publishes([
+                __DIR__.'/../examples/UploadController.php' => app_path('Http/Controllers/UploadController.php'),
+            ], 'clearcut-upload-controller');
 
             // A file of its own rather than lines pasted into routes/api.php,
             // so the application's routes and these stay apart and the `use`

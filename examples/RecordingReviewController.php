@@ -47,6 +47,16 @@ class RecordingReviewController extends Controller
         'mark_size' => 'nullable|in:large,medium,small',
         'mark_speed' => 'nullable|numeric|between:0.25,2',
         'output_destination' => 'nullable|in:s3,local',
+        // Fragments to look in, seconds. Omitted: the whole recording. t1 > t0,
+        // apart and at least half a second long is checked by the service.
+        'ranges' => 'nullable|array|min:1|max:100',
+        'ranges.*.t0' => 'required|numeric|min:0',
+        'ranges.*.t1' => 'required|numeric|min:0',
+        // What to cut out, seconds. A pass of its own: with mode none and no
+        // mark, a run that only cuts.
+        'cuts' => 'nullable|array|min:1|max:100',
+        'cuts.*.t0' => 'required|numeric|min:0',
+        'cuts.*.t1' => 'required|numeric|min:0',
     ];
 
     public function __construct(
@@ -147,6 +157,8 @@ class RecordingReviewController extends Controller
                 // Detection only; the mark is chosen at apply.
                 markType: JobRequest::MARK_NONE,
                 profile: $validated['profile'] ?? 'balanced',
+                ranges: $validated['ranges'] ?? null,
+                cuts: $validated['cuts'] ?? null,
             ));
         } catch (\InvalidArgumentException $e) {
             $record->delete();
@@ -204,6 +216,8 @@ class RecordingReviewController extends Controller
                 outputDestination: $validated['output_destination'] ?? null,
                 markSize: $validated['mark_size'] ?? JobRequest::SIZE_LARGE,
                 markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
+                ranges: $validated['ranges'] ?? null,
+                cuts: $validated['cuts'] ?? null,
             ));
         } catch (\InvalidArgumentException $e) {
             $record->delete();
@@ -316,7 +330,7 @@ class RecordingReviewController extends Controller
     {
         return array_intersect_key($validated, array_flip([
             'mode', 'profile', 'redaction_style', 'brand', 'mark_type',
-            'mark_size', 'mark_speed', 'output_destination',
+            'mark_size', 'mark_speed', 'output_destination', 'ranges', 'cuts',
         ])) + ['review' => $review];
     }
 
@@ -335,6 +349,11 @@ class RecordingReviewController extends Controller
         $analyse = $validated['kind'] === 'analyse';
         if ($analyse && $validated['mode'] === 'none') {
             return response()->json(['message' => 'An analysis needs a detection mode'], 422);
+        }
+        // Fragments are moments in one recording; the same seconds of another
+        // mean nothing.
+        if ((isset($validated['ranges']) || isset($validated['cuts'])) && count($validated['video_ids']) > 1) {
+            return response()->json(['message' => 'Fragments and cuts can be chosen for one recording at a time'], 422);
         }
 
         $recordings = $this->files->model()::findMany($validated['video_ids'])->keyBy(fn (Model $r) => (string) $r->getKey());
@@ -374,6 +393,8 @@ class RecordingReviewController extends Controller
                 outputDestination: $validated['output_destination'] ?? null,
                 markSize: $validated['mark_size'] ?? JobRequest::SIZE_LARGE,
                 markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
+                ranges: $validated['ranges'] ?? null,
+                cuts: $validated['cuts'] ?? null,
             );
             $batch = $this->clearcut->processBatch(BatchRequest::of(
                 collect($records)->mapWithKeys(fn (ClearcutJob $r) => [(string) $r->id => $r->source_key])->all(),
@@ -481,16 +502,18 @@ class RecordingReviewController extends Controller
             $status = $this->clearcut->job($serviceJobId);
         } catch (ClearcutRequestException $e) {
             // The service forgets finished jobs after an hour; the row keeps the outcome.
+            // A local output outlives the job there (a day against an hour), so
+            // its destination is passed on where the run stored one.
             if ($e->isNotFound() && $record->finished_at !== null) {
-                return response()->json($record->only([
+                return response()->json(['id' => $record->id] + $record->only([
                     'state', 'stage', 'progress', 'output_key', 'audit_key', 'error',
-                ]));
+                ]) + array_filter(['output_destination' => $record->settings['output_destination'] ?? null]));
             }
 
             if ($e->isNotFound()) {
                 $record->markLost();
 
-                return response()->json($record->only(['state', 'stage', 'progress', 'error']));
+                return response()->json(['id' => $record->id] + $record->only(['state', 'stage', 'progress', 'error']));
             }
 
             return response()->json(['message' => $e->getMessage()], $e->status);
@@ -504,7 +527,10 @@ class RecordingReviewController extends Controller
             return response()->json(['id' => $record->id] + $record->only(['state', 'stage', 'error']));
         }
 
-        return response()->json($status->toArray());
+        // The row id, as every route here takes it. Without it the client
+        // falls back to the service's job id, and saving a local output asks
+        // for /jobs/<that id>/output — a row that does not exist.
+        return response()->json(['id' => $record->id] + $status->toArray());
     }
 
     /**
@@ -765,6 +791,11 @@ class RecordingReviewController extends Controller
             'regions' => array_map(self::regionPayload(...), $proposal->regions),
             // Regions the service could not resolve: left uncovered.
             'rejected' => $proposal->rejected,
+            // Where detection looked; null for the whole recording. The
+            // screen says what was never checked.
+            'ranges' => $proposal->ranges,
+            // What the analysis was asked to cut out; the review may change it.
+            'cuts' => $proposal->cuts,
         ]);
     }
 
@@ -918,6 +949,11 @@ class RecordingReviewController extends Controller
             'mark_speed' => 'nullable|numeric|between:0.25,2',
             'allow_undecided' => 'boolean',
             'output_destination' => 'nullable|in:s3,local',
+            // Present: the reviewer's cut, replacing the analysis' (null cuts
+            // nothing). Absent: the analysis' cut stands.
+            'cuts' => 'nullable|array|max:100',
+            'cuts.*.t0' => 'required|numeric|min:0',
+            'cuts.*.t1' => 'required|numeric|min:0',
         ]);
 
         if ($record->service_analysis_id === null) {
@@ -943,6 +979,7 @@ class RecordingReviewController extends Controller
                 outputDestination: $validated['output_destination'] ?? null,
                 markSize: $validated['mark_size'] ?? 'large',
                 markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
+                cuts: $request->exists('cuts') ? ($validated['cuts'] ?? []) : null,
             );
         } catch (ClearcutRequestException $e) {
             // 409: regions still undecided, and would not be covered.
@@ -955,7 +992,7 @@ class RecordingReviewController extends Controller
             'reviewed_by_human' => true,
             // The reviewer's final choices over those the analysis started with.
             'settings' => array_intersect_key($validated, array_flip([
-                'redaction_style', 'brand', 'mark_type', 'mark_size', 'mark_speed', 'output_destination',
+                'redaction_style', 'brand', 'mark_type', 'mark_size', 'mark_speed', 'output_destination', 'cuts',
             ])) + ['review' => false] + ($record->settings ?? []),
         ]);
 
@@ -980,6 +1017,15 @@ class RecordingReviewController extends Controller
             return response()->json(['message' => $e->getMessage()], 503);
         }
 
+        // An uploaded recording is named after the file the user picked: the
+        // service only knows this row's id, and "42_rw.mp4" in their folder
+        // says nothing about which recording it was.
+        $filename = $output['filename'];
+        if ($record->source_name !== null) {
+            $base = pathinfo($record->source_name, PATHINFO_FILENAME);
+            $filename = $base.($output['passes'] !== '' ? "_{$output['passes']}" : '').'.mp4';
+        }
+
         return response()->stream(function () use ($output) {
             $stream = $output['stream'];
             while (! $stream->eof()) {
@@ -991,7 +1037,13 @@ class RecordingReviewController extends Controller
             // Size and checksum let the browser confirm a complete save.
             'Content-Length' => (string) $output['size'],
             'X-Content-SHA256' => $output['sha256'],
-            'Content-Disposition' => 'attachment; filename="'.$output['filename'].'"',
+            // RFC 5987 beside the plain form: a picked file's name is often
+            // not ASCII, and the plain one cannot carry it.
+            'Content-Disposition' => sprintf(
+                'attachment; filename="%s"; filename*=UTF-8\'\'%s',
+                str_replace(['"', '\\'], '_', $filename),
+                rawurlencode($filename),
+            ),
             'Cache-Control' => 'no-store',
         ]);
     }
@@ -1021,9 +1073,28 @@ class RecordingReviewController extends Controller
 
         try {
             $released = $this->clearcut->releaseOutput($record->service_job_id);
+
+            // A recording sent from the user's computer has served its
+            // purpose once the result is on that computer too. Deleted now
+            // rather than left a day for the service's sweep: it is a QA
+            // recording on a server, and processing it again means sending
+            // it again.
+            if ($record->subject_type === UploadController::SUBJECT && isset($record->settings['upload_id'])) {
+                try {
+                    $this->clearcut->deleteUpload((string) $record->settings['upload_id']);
+                    $this->log()->info('clearcut.upload_deleted', ['job_row' => $record->id, 'reason' => 'saved']);
+                } catch (ClearcutRequestException $e) {
+                    // Not the user's problem: the save succeeded, and the
+                    // service's sweep removes the upload within a day.
+                    $this->log()->warning('clearcut.upload_kept', ['job_row' => $record->id, 'error' => $e->getMessage()]);
+                }
+            }
         } catch (ClearcutUnavailableException $e) {
             return response()->json(['message' => $e->getMessage()], 503);
         }
+
+        // The browser's word, after it wrote the file and its size matched.
+        $record->update(['saved_at' => $record->saved_at ?? now()]);
 
         return response()->json(['released' => $released]);
     }

@@ -58,6 +58,18 @@ return [
     'max_job_seconds' => (int) env('CLEARCUT_MAX_JOB_SECONDS', 3600),
 
     /*
+     | The largest chunk of an upload this application relays, as 32MB, 4GB or
+     | bytes.
+     |
+     | The body limit of THIS application's web server and PHP, not the
+     | service's: the browser sends each chunk here first. The chunk actually
+     | used is the smaller of this and what the service accepts. nginx allows
+     | 1MB unless client_max_body_size is raised; PHP's post_max_size does not
+     | apply, since a chunk is a raw PUT body, not a form.
+     */
+    'upload_chunk_limit' => env('CLEARCUT_UPLOAD_CHUNK_LIMIT', '8MB'),
+
+    /*
      | Off refuses every new run; running ones and their results are untouched.
      */
     'enabled' => (bool) env('CLEARCUT_ENABLED', true),

@@ -222,9 +222,10 @@ class ClearcutFiles
         // From the audit: what was done, not what was asked.
         $redacted = ($audit['mode'] ?? 'none') !== 'none';
         $watermarked = ($audit['mark_type'] ?? 'none') !== 'none';
-        $passes = ($redacted ? 'r' : '').($watermarked ? 'w' : '');
+        $trimmed = ! empty($audit['cuts']);
+        $passes = ($redacted ? 'r' : '').($watermarked ? 'w' : '').($trimmed ? 't' : '');
         if ($passes === '') {
-            throw new RuntimeException('its audit records neither a redaction nor a watermark');
+            throw new RuntimeException('its audit records neither a redaction, a watermark nor a cut');
         }
 
         $output = $this->private()->path($row->output_key);

@@ -40,6 +40,7 @@ final class JobStatus
      * @param  bool|null  $redacted  whether a finished encode ran the redaction pass; null until one has
      * @param  bool|null  $watermarked  whether a finished encode burned in a mark; null until one has
      * @param  int|null  $elapsed  seconds since work began, by the service's clock; null while queued
+     * @param  bool|null  $trimmed  whether a finished encode cut parts out; null until one has
      */
     public function __construct(
         public readonly string $jobId,
@@ -65,6 +66,7 @@ final class JobStatus
         public readonly ?bool $redacted = null,
         public readonly ?bool $watermarked = null,
         public readonly ?int $elapsed = null,
+        public readonly ?bool $trimmed = null,
     ) {
     }
 
@@ -106,6 +108,7 @@ final class JobStatus
             redacted: isset($data['redacted']) ? (bool) $data['redacted'] : null,
             watermarked: isset($data['watermarked']) ? (bool) $data['watermarked'] : null,
             elapsed: isset($data['elapsed']) ? (int) $data['elapsed'] : null,
+            trimmed: isset($data['trimmed']) ? (bool) $data['trimmed'] : null,
         );
     }
 
@@ -179,6 +182,7 @@ final class JobStatus
             'redacted' => $this->redacted,
             'watermarked' => $this->watermarked,
             'elapsed' => $this->elapsed,
+            'trimmed' => $this->trimmed,
         ], static fn ($value) => $value !== null);
     }
 }

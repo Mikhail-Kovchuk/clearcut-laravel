@@ -20,6 +20,8 @@ final class AnalysisProposal
      * @param  array<int, array<string, mixed>>  $rejected  proposed but outside the frame
      * @param  array{width: int, height: int}  $frame  the geometry regions are measured in
      * @param  float  $duration  seconds; 0 for a proposal older than this field
+     * @param  array<int, array{0: float, 1: float}>|null  $ranges  the fragments detection was limited to; null for the whole recording
+     * @param  array<int, array{0: float, 1: float}>|null  $cuts  what the analysis was asked to cut out, and so did not look at
      */
     public function __construct(
         public readonly string $jobId,
@@ -31,6 +33,8 @@ final class AnalysisProposal
         public readonly string $mode = 'auto',
         public readonly string $profile = 'balanced',
         public readonly float $duration = 0.0,
+        public readonly ?array $ranges = null,
+        public readonly ?array $cuts = null,
     ) {
     }
 
@@ -49,6 +53,8 @@ final class AnalysisProposal
             mode: (string) ($data['mode'] ?? 'auto'),
             profile: (string) ($data['profile'] ?? 'balanced'),
             duration: (float) ($data['duration'] ?? 0.0),
+            ranges: $data['ranges'] ?? null,
+            cuts: $data['cuts'] ?? null,
         );
     }
 

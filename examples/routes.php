@@ -18,7 +18,32 @@
  */
 
 use App\Http\Controllers\RecordingReviewController;
+use App\Http\Controllers\UploadController;
 use Illuminate\Support\Facades\Route;
+
+// Recordings sent from the user's computer. Each upload is a row; after it
+// starts, its job is polled, reviewed and saved through `recordings/jobs/…`
+// below like any other. The chunk route takes the raw body: the browser PUTs
+// bytes, not a form.
+Route::middleware(['auth:sanctum', 'can:process-recordings'])
+    ->prefix('uploads')
+    ->group(function () {
+        Route::get('/', [UploadController::class, 'index']);
+        Route::post('/', [UploadController::class, 'create']);
+        Route::get('{record}', [UploadController::class, 'show']);
+        Route::put('{record}/chunk', [UploadController::class, 'chunk']);
+        Route::post('{record}/complete', [UploadController::class, 'complete']);
+        Route::delete('{record}', [UploadController::class, 'destroy']);
+        Route::get('{record}/url', [UploadController::class, 'videoUrl']);
+    });
+
+// The player's way to the recording. OUTSIDE any auth group — a <video>
+// element cannot send a bearer token — and guarded by the signature
+// `uploads/{record}/url` hands out, valid for half an hour. With this file
+// required inside an authenticated group, register this one route outside it.
+Route::get('uploads/{record}/video', [UploadController::class, 'video'])
+    ->middleware('signed')
+    ->name('clearcut.upload-video');
 
 Route::middleware(['auth:sanctum', 'can:process-recordings'])
     ->prefix('recordings')
