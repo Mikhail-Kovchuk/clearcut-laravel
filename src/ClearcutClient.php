@@ -597,6 +597,52 @@ class ClearcutClient
     }
 
     /**
+     * Add a brand. `$logoPng` is the PNG's bytes; a brand needs a logo, a
+     * text or both. 409 when the slug is taken: an add never overwrites
+     * another brand's mark.
+     */
+    public function createBrand(string $slug, string $label, ?string $text, ?string $logoPng = null): Brand
+    {
+        $payload = ['slug' => $slug, 'label' => $label, 'text' => $text];
+        if ($logoPng !== null) {
+            $payload['logo'] = base64_encode($logoPng);
+        }
+
+        return Brand::fromArray($this->send('POST', '/brands', $payload));
+    }
+
+    /**
+     * Change a brand's name and wordmark, and its logo: new bytes in
+     * `$logoPng`, removed with `$removeLogo`, kept with neither. 409 when a
+     * job not finished yet still needs a mark being removed.
+     */
+    public function updateBrand(
+        string $slug,
+        string $label,
+        ?string $text,
+        ?string $logoPng = null,
+        bool $removeLogo = false,
+    ): Brand {
+        $payload = ['label' => $label, 'text' => $text];
+        if ($logoPng !== null) {
+            $payload['logo'] = base64_encode($logoPng);
+        } elseif ($removeLogo) {
+            $payload['logo'] = null;
+        }
+
+        return Brand::fromArray($this->send('PUT', '/brands/'.rawurlencode($slug), $payload));
+    }
+
+    /**
+     * Remove a brand. Footage already marked keeps its mark; 409 while a job
+     * not finished yet will draw it.
+     */
+    public function deleteBrand(string $slug): void
+    {
+        $this->send('DELETE', '/brands/'.rawurlencode($slug));
+    }
+
+    /**
      * The mark a brand would burn in.
      *
      * A logo comes back as raw PNG bytes under `image`; a wordmark as its text.
@@ -657,6 +703,7 @@ class ClearcutClient
                 'GET' => $request->get($this->url($path)),
                 'POST' => $request->post($this->url($path), $payload),
                 'PATCH' => $request->patch($this->url($path), $payload),
+                'PUT' => $request->put($this->url($path), $payload),
                 'DELETE' => $request->delete($this->url($path)),
                 default => throw new ClearcutException("Unsupported method {$method}"),
             };

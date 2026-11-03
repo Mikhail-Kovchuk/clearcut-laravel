@@ -90,6 +90,10 @@ class ClearcutServiceProvider extends ServiceProvider
                 __DIR__.'/../examples/UploadController.php' => app_path('Http/Controllers/UploadController.php'),
             ], 'clearcut-upload-controller');
 
+            $this->publishes([
+                __DIR__.'/../examples/BrandController.php' => app_path('Http/Controllers/BrandController.php'),
+            ], 'clearcut-brand-controller');
+
             // A file of its own rather than lines pasted into routes/api.php,
             // so the application's routes and these stay apart and the `use`
             // lines cannot collide.

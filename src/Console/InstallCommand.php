@@ -36,6 +36,7 @@ class InstallCommand extends Command
         // Its own check: an install from before uploads keeps its review
         // controller and still needs this one.
         $this->publish('clearcut-upload-controller', app_path('Http/Controllers/UploadController.php'), 'app/Http/Controllers/UploadController.php');
+        $this->publish('clearcut-brand-controller', app_path('Http/Controllers/BrandController.php'), 'app/Http/Controllers/BrandController.php');
         $this->publish('clearcut-routes', base_path('routes/clearcut.php'), 'routes/clearcut.php');
         $this->publish('clearcut-services', app_path('Services/ClearcutFiles.php'), 'app/Services/ClearcutFiles.php');
         $this->publish('clearcut-jobs', app_path('Jobs/WatchClearcutJob.php'), 'app/Jobs/WatchClearcutJob.php');

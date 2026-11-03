@@ -7,8 +7,9 @@
  * The paths match `examples/createClearcutApi.ts` in the React package; change
  * one and change the other.
  *
- * `auth:sanctum` and `can:process-recordings` are placeholders: the second
- * denies until the application defines that ability, so a copy fails closed.
+ * `auth:sanctum`, `can:process-recordings` and `can:manage-brands` are
+ * placeholders: the abilities deny until the application defines them, so a
+ * copy fails closed.
  * With a guard of its own (JWT, say), require this file inside the group that
  * already authenticates the panel and drop both.
  *
@@ -17,9 +18,22 @@
  * everyone may, add a policy check in each action.
  */
 
+use App\Http\Controllers\BrandController;
 use App\Http\Controllers\RecordingReviewController;
 use App\Http\Controllers\UploadController;
 use Illuminate\Support\Facades\Route;
+
+// The watermark brands. Changing one changes the mark on every recording
+// processed for it afterwards, so `can:manage-brands` is a separate ability
+// from processing. An update is a POST: it may carry a file.
+Route::middleware(['auth:sanctum', 'can:manage-brands'])
+    ->prefix('brands')
+    ->group(function () {
+        Route::get('/', [BrandController::class, 'index']);
+        Route::post('/', [BrandController::class, 'store']);
+        Route::post('{slug}', [BrandController::class, 'update']);
+        Route::delete('{slug}', [BrandController::class, 'destroy']);
+    });
 
 // Recordings sent from the user's computer. Each upload is a row; after it
 // starts, its job is polled, reviewed and saved through `recordings/jobs/…`

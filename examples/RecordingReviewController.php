@@ -121,7 +121,8 @@ class RecordingReviewController extends Controller
 
         return response($preview['image'], 200, [
             'Content-Type' => 'image/png',
-            'Cache-Control' => 'private, max-age=3600',
+            // Not cached: a replaced logo must show at once.
+            'Cache-Control' => 'private, no-cache',
         ]);
     }
 

@@ -268,7 +268,25 @@ Each user sees only their own uploads. Three things to set up:
   `…_add_upload_columns_to_clearcut_jobs_table.php`, which `clearcut:install`
   publishes for a table created before uploads.
 
-### 6. Optional: replacing the original
+### 6. Optional: managing brands from the panel
+
+`BrandController` lists, adds, changes and removes the watermark brands. They
+stay in the service's brands file (`CLEARCUT_BRANDS`), which the service then
+needs write access to; `deploy/install.sh` grants it.
+
+| Route | |
+|---|---|
+| `GET brands` | `slug`, `label`, `logo` (whether it has one), `text`, `mark_types` |
+| `POST brands` | a form: `slug`, `label`, `text?`, `logo?` (PNG, 10 MB; PHP's `upload_max_filesize` and `post_max_size` must allow it); `409` when the slug is taken |
+| `POST brands/{slug}` | the same without `slug`, plus `remove_logo`; no `logo` keeps it. A POST because a file only arrives on one |
+| `DELETE brands/{slug}` | remove it; footage already marked keeps its mark |
+
+A brand needs a logo, a wordmark or both. Removing a mark that a queued or
+running job will draw is `409` until that job is done. The routes ask for
+`can:manage-brands`, apart from processing: a changed brand changes the mark
+on every recording processed for it afterwards.
+
+### 7. Optional: replacing the original
 
 By default the service writes its output beside the original, under its own
 `processed/` prefix, and the recording is untouched: `output_key` on the row
