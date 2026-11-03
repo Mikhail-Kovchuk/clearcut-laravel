@@ -26,13 +26,16 @@ return new class extends Migration
             if (! Schema::hasColumn('clearcut_jobs', 'saved_at')) {
                 $table->timestamp('saved_at')->nullable()->after('placed_at');
             }
+            if (! Schema::hasColumn('clearcut_jobs', 'dismissed_at')) {
+                $table->timestamp('dismissed_at')->nullable()->after('saved_at');
+            }
         });
     }
 
     public function down(): void
     {
         Schema::table('clearcut_jobs', function (Blueprint $table) {
-            $table->dropColumn(['source_name', 'saved_at']);
+            $table->dropColumn(['source_name', 'saved_at', 'dismissed_at']);
         });
     }
 };

@@ -125,6 +125,11 @@ return new class extends Migration
             // it now shows the processed file.
             $table->timestamp('saved_at')->nullable();
 
+            // When the user cleared a finished upload from their list. Hidden,
+            // not deleted: the row is still the record of what was processed
+            // for whom.
+            $table->timestamp('dismissed_at')->nullable();
+
             // How many regions were covered, and how many were proposed but
             // could not be resolved. The second is not decoration: a rejected
             // region is one the service refused to guess at, so something on

@@ -231,6 +231,7 @@ class UploadController extends Controller
         $rows = ClearcutJob::query()
             ->where('subject_type', self::SUBJECT)
             ->where('requested_by', $request->user()?->getAuthIdentifier())
+            ->whereNull('dismissed_at')
             ->where('created_at', '>', now()->subDays(7))
             ->latest('id')
             ->limit(50)
@@ -310,6 +311,46 @@ class UploadController extends Controller
         $this->log()->info('clearcut.upload_deleted', ['job_row' => $record->id, 'user' => $request->user()?->getAuthIdentifier()]);
 
         return response()->json($this->payload($record->fresh()));
+    }
+
+    /**
+     * Take a finished upload off the user's list. Hidden, not deleted: the
+     * row is still the record of what was processed for whom. Only what is
+     * over — saved, discarded or failed; a result not saved yet is refused,
+     * since clearing it from view would leave it waiting on the server.
+     */
+    public function dismiss(Request $request, ClearcutJob $record): JsonResponse
+    {
+        $this->own($request, $record);
+        if (! self::finished($record)) {
+            return response()->json(['message' => 'Only finished uploads can be cleared; save or discard this one first'], 409);
+        }
+        $record->update(['dismissed_at' => now()]);
+
+        return response()->json(['dismissed' => 1]);
+    }
+
+    /** Take every finished upload of this user off their list. */
+    public function dismissFinished(Request $request): JsonResponse
+    {
+        $rows = ClearcutJob::query()
+            ->where('subject_type', self::SUBJECT)
+            ->where('requested_by', $request->user()?->getAuthIdentifier())
+            ->whereNull('dismissed_at')
+            ->get()
+            ->filter(self::finished(...));
+
+        ClearcutJob::whereKey($rows->modelKeys())->update(['dismissed_at' => now()]);
+        $this->log()->info('clearcut.uploads_dismissed', ['count' => $rows->count(), 'user' => $request->user()?->getAuthIdentifier()]);
+
+        return response()->json(['dismissed' => $rows->count()]);
+    }
+
+    /** Nothing more will happen to it, and nothing of it waits on the server. */
+    private static function finished(ClearcutJob $record): bool
+    {
+        return $record->saved_at !== null
+            || in_array($record->state, [JobStatus::FAILED, JobStatus::CANCELLED], true);
     }
 
     /**

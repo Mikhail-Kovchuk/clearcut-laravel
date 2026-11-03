@@ -246,6 +246,7 @@ one to the service, which holds the recording while it is processed.
 | `POST uploads/{id}/complete` `{sha256?}` | the service checks the file, then the job starts — `process`, or `analyze` with `review` |
 | `GET uploads` · `GET uploads/{id}` | the user's uploads; one still arriving reports `received`, to resume from |
 | `DELETE uploads/{id}` | stop its work, delete the recording and any unsaved result on the service |
+| `POST uploads/{id}/dismiss` · `POST uploads/dismiss-finished` | clear finished uploads (saved, discarded, failed) from the list; the rows stay, hidden |
 | `GET uploads/{id}/url` | a 30-minute signed URL for the review player |
 
 From `complete` on, the row is a run like any other: polled, reviewed and

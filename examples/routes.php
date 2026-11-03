@@ -30,6 +30,9 @@ Route::middleware(['auth:sanctum', 'can:process-recordings'])
     ->group(function () {
         Route::get('/', [UploadController::class, 'index']);
         Route::post('/', [UploadController::class, 'create']);
+        // Before the {record} routes, or "dismiss-finished" would be an id.
+        Route::post('dismiss-finished', [UploadController::class, 'dismissFinished']);
+        Route::post('{record}/dismiss', [UploadController::class, 'dismiss']);
         Route::get('{record}', [UploadController::class, 'show']);
         Route::put('{record}/chunk', [UploadController::class, 'chunk']);
         Route::post('{record}/complete', [UploadController::class, 'complete']);
