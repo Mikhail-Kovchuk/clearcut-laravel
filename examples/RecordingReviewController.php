@@ -658,6 +658,7 @@ class RecordingReviewController extends Controller
             },
             'redacted' => $output?->redacted,
             'watermarked' => $output?->watermarked,
+            'trimmed' => $output?->trimmed,
             'regions' => $output?->regions,
             'processed_at' => $output?->finished_at,
             'error' => $latest?->state === JobStatus::FAILED ? $latest->error : null,

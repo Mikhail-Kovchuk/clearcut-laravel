@@ -271,7 +271,7 @@ class ClearcutFiles
             throw new RuntimeException('the output could not be renamed into place');
         }
 
-        DB::transaction(function () use ($recording, $row, $dest, $destPath, $orgKey, $redacted, $watermarked) {
+        DB::transaction(function () use ($recording, $row, $dest, $destPath, $orgKey, $redacted, $watermarked, $trimmed) {
             $attributes = [
                 config('clearcut.recordings.path', 'path') => $dest,
                 config('clearcut.replace_original.original_path', 'original_path') => $orgKey,
@@ -284,6 +284,7 @@ class ClearcutFiles
             $row->update([
                 'redacted' => $row->redacted ?? $redacted,
                 'watermarked' => $row->watermarked ?? $watermarked,
+                'trimmed' => $row->trimmed ?? $trimmed,
             ]);
         });
 

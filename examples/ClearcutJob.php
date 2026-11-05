@@ -42,6 +42,7 @@ class ClearcutJob extends Model
         'audit_key',
         'redacted',
         'watermarked',
+        'trimmed',
         'placed_at',
         'saved_at',
         'dismissed_at',
@@ -68,6 +69,7 @@ class ClearcutJob extends Model
             'settings' => 'array',
             'redacted' => 'boolean',
             'watermarked' => 'boolean',
+            'trimmed' => 'boolean',
         ];
     }
 
@@ -121,6 +123,7 @@ class ClearcutJob extends Model
             // it ends, and a later sync must not turn "redacted" back to null.
             'redacted' => $status->redacted ?? $this->redacted,
             'watermarked' => $status->watermarked ?? $this->watermarked,
+            'trimmed' => $status->trimmed ?? $this->trimmed,
             'rejected_regions' => $status->rejectedRegions,
             'error' => $status->error,
             'finished_at' => $status->finished() ? now() : null,

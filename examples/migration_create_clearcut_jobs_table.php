@@ -104,14 +104,16 @@ return new class extends Migration
             $table->string('audit_key', 1024)->nullable();
 
             // Which passes the finished encode ran, as the service reports it:
-            // two separate questions, since a partner may need the mark and
-            // the redaction independently. They describe the OUTPUT above,
+            // separate questions, since a partner may need the mark, the
+            // redaction and the cut independently. They describe the OUTPUT above,
             // never the recording — the original at the recording's own path
             // is untouched by either, and a flag on it would say otherwise.
             // Null until an encode has finished. A redaction pass that covered
             // nothing still ran: `regions` says how much it covered.
             $table->boolean('redacted')->nullable();
             $table->boolean('watermarked')->nullable();
+            // Parts cut out: without it a trim-only run looks unprocessed.
+            $table->boolean('trimmed')->nullable();
 
             // When the application put the finished output where its users
             // see it — beside the recording, in place of it. Taken with a

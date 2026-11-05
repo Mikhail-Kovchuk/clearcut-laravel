@@ -216,7 +216,7 @@ The rows are the record of what runs, so any browser can find its way back:
 
 | Route | |
 |---|---|
-| `GET recordings/status?video_ids[]=…` | per recording: `state` (`running`, `review`, `done`, `failed`, `none`), the last encode's `redacted` / `watermarked` / `regions` / `processed_at`, and `run` — the latest open run with its settings, to reopen the dialog on |
+| `GET recordings/status?video_ids[]=…` | per recording: `state` (`running`, `review`, `done`, `failed`, `none`), the last encode's `redacted` / `watermarked` / `trimmed` (its column comes from `…_add_trimmed_to_clearcut_jobs_table.php`, which `clearcut:install` publishes for an older table) / `regions` / `processed_at`, and `run` — the latest open run with its settings, to reopen the dialog on |
 | `POST recordings/cancel` `{video_ids}` | stop the running work of those recordings |
 
 Rows still running are synced with the service on each status request, and a

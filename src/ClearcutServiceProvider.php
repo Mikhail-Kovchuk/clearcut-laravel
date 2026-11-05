@@ -68,13 +68,17 @@ class ClearcutServiceProvider extends ServiceProvider
             $this->publishesMigrations([
                 __DIR__.'/../examples/migration_create_clearcut_jobs_table.php' => database_path('migrations/2026_01_01_000000_create_clearcut_jobs_table.php'),
                 __DIR__.'/../examples/migration_add_upload_columns_to_clearcut_jobs_table.php' => database_path('migrations/2026_11_01_000000_add_upload_columns_to_clearcut_jobs_table.php'),
+                __DIR__.'/../examples/migration_add_trimmed_to_clearcut_jobs_table.php' => database_path('migrations/2026_11_05_000000_add_trimmed_to_clearcut_jobs_table.php'),
             ], 'clearcut-migrations');
 
-            // The second on its own too, for a table created before uploads:
-            // publishing the whole tag again would add a second create.
+            // The later ones on their own too, for a table created before
+            // them: publishing the whole tag again would add a second create.
             $this->publishesMigrations([
                 __DIR__.'/../examples/migration_add_upload_columns_to_clearcut_jobs_table.php' => database_path('migrations/2026_11_01_000000_add_upload_columns_to_clearcut_jobs_table.php'),
             ], 'clearcut-migrations-uploads');
+            $this->publishesMigrations([
+                __DIR__.'/../examples/migration_add_trimmed_to_clearcut_jobs_table.php' => database_path('migrations/2026_11_05_000000_add_trimmed_to_clearcut_jobs_table.php'),
+            ], 'clearcut-migrations-trimmed');
 
             // The rest of the examples, same reasoning: once published they are
             // application code, and each has lines to adapt before it runs.

@@ -25,6 +25,12 @@ class InstallCommand extends Command
 
     protected $description = 'Publish the clearcut config and examples, wire the routes and run the migration';
 
+    /** Migrations after the create, by name, with the tag that publishes each alone. */
+    private const LATER_MIGRATIONS = [
+        'add_upload_columns_to_clearcut_jobs_table' => 'clearcut-migrations-uploads',
+        'add_trimmed_to_clearcut_jobs_table' => 'clearcut-migrations-trimmed',
+    ];
+
     public function handle(Filesystem $files): int
     {
         $this->components->info('Installing clearcut/clearcut-laravel');
@@ -85,10 +91,12 @@ class InstallCommand extends Command
                 '<fg=yellow>exists, kept</>',
             );
 
-            // A table from before uploads still needs their columns.
-            if ($files->glob(database_path('migrations/*_add_upload_columns_to_clearcut_jobs_table.php')) === []) {
-                $this->callSilently('vendor:publish', ['--tag' => 'clearcut-migrations-uploads']);
-                $this->components->twoColumnDetail('database/migrations/…_add_upload_columns_to_clearcut_jobs_table.php', '<fg=green>published</>');
+            // A table from before a later migration still needs its columns.
+            foreach (self::LATER_MIGRATIONS as $name => $tag) {
+                if ($files->glob(database_path("migrations/*_{$name}.php")) === []) {
+                    $this->callSilently('vendor:publish', ['--tag' => $tag]);
+                    $this->components->twoColumnDetail("database/migrations/…_{$name}.php", '<fg=green>published</>');
+                }
             }
 
             return;
@@ -96,7 +104,7 @@ class InstallCommand extends Command
 
         $this->callSilently('vendor:publish', ['--tag' => 'clearcut-migrations']);
 
-        foreach (['create_clearcut_jobs_table', 'add_upload_columns_to_clearcut_jobs_table'] as $name) {
+        foreach (['create_clearcut_jobs_table', ...array_keys(self::LATER_MIGRATIONS)] as $name) {
             $published = $files->glob(database_path("migrations/*_{$name}.php"));
             $this->components->twoColumnDetail(
                 'database/migrations/'.basename($published[0] ?? "{$name}.php"),
