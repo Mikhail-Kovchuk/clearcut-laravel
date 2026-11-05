@@ -41,6 +41,10 @@ final class JobStatus
      * @param  bool|null  $watermarked  whether a finished encode burned in a mark; null until one has
      * @param  int|null  $elapsed  seconds since work began, by the service's clock; null while queued
      * @param  bool|null  $trimmed  whether a finished encode cut parts out; null until one has
+     * @param  int|null  $idle  seconds since a running job last moved; null unless running
+     * @param  bool|null  $stalled  whether a running job has gone without moving past the service's threshold
+     * @param  array{position: int, running: list<array<string, mixed>>}|null  $queue
+     *         a queued job's place in line and the jobs running ahead of it, as the service reports them
      */
     public function __construct(
         public readonly string $jobId,
@@ -67,6 +71,9 @@ final class JobStatus
         public readonly ?bool $watermarked = null,
         public readonly ?int $elapsed = null,
         public readonly ?bool $trimmed = null,
+        public readonly ?int $idle = null,
+        public readonly ?bool $stalled = null,
+        public readonly ?array $queue = null,
     ) {
     }
 
@@ -109,6 +116,12 @@ final class JobStatus
             watermarked: isset($data['watermarked']) ? (bool) $data['watermarked'] : null,
             elapsed: isset($data['elapsed']) ? (int) $data['elapsed'] : null,
             trimmed: isset($data['trimmed']) ? (bool) $data['trimmed'] : null,
+            // Null when absent, not 0 and false: a queued job and an older
+            // service say nothing about movement, and "idle 0, not stalled"
+            // would claim it had been seen moving a moment ago.
+            idle: isset($data['idle']) ? (int) $data['idle'] : null,
+            stalled: isset($data['stalled']) ? (bool) $data['stalled'] : null,
+            queue: isset($data['queue']) && is_array($data['queue']) ? $data['queue'] : null,
         );
     }
 
@@ -139,6 +152,17 @@ final class JobStatus
     public function cancelled(): bool
     {
         return $this->state === self::CANCELLED;
+    }
+
+    /**
+     * Whether the service reports this running job as not moving.
+     *
+     * Not a failure: the job may still finish, and the service says so with
+     * `job.resumed` in its journal. It is the cue to look, not to give up.
+     */
+    public function isStalled(): bool
+    {
+        return $this->stalled === true;
     }
 
     /**
@@ -183,6 +207,9 @@ final class JobStatus
             'watermarked' => $this->watermarked,
             'elapsed' => $this->elapsed,
             'trimmed' => $this->trimmed,
+            'idle' => $this->idle,
+            'stalled' => $this->stalled,
+            'queue' => $this->queue,
         ], static fn ($value) => $value !== null);
     }
 }
