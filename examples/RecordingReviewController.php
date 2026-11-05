@@ -439,6 +439,10 @@ class RecordingReviewController extends Controller
         try {
             $batch = $this->clearcut->batch($batchId);
         } catch (ClearcutRequestException $e) {
+            if ($e->isNotFound() && ($rows = $this->forgottenBatch($batchId)) !== null) {
+                return response()->json($rows);
+            }
+
             return response()->json(['message' => $e->getMessage()], $e->status);
         }
 
@@ -453,6 +457,62 @@ class RecordingReviewController extends Controller
         }
 
         return response()->json($this->batchPayload($batch->toArray()));
+    }
+
+    /**
+     * A batch the service no longer knows, answered from the rows. It forgets
+     * a batch an hour after it ends, and all of them when it restarts — a
+     * killed encode restarted it. Each row still open is asked for on its own
+     * and failed when the service lost it too; answered with the 404 instead,
+     * the dialog kept polling and showed the last progress for hours.
+     *
+     * @return array<string, mixed>|null  null when no row belongs to it
+     */
+    private function forgottenBatch(string $batchId): ?array
+    {
+        $rows = ClearcutJob::where('batch_id', $batchId)->orderBy('id')->get();
+        if ($rows->isEmpty()) {
+            return null;
+        }
+
+        foreach ($rows->whereIn('state', [JobStatus::QUEUED, JobStatus::RUNNING]) as $row) {
+            try {
+                $row->syncFrom($this->clearcut->job((string) ($row->service_job_id ?? $row->service_analysis_id)));
+            } catch (ClearcutRequestException $e) {
+                if ($e->isNotFound()) {
+                    $row->markLost();
+                }
+            } catch (ClearcutUnavailableException) {
+                // Left as it is; the next poll asks again.
+            }
+        }
+
+        $ended = [JobStatus::DONE, JobStatus::FAILED, JobStatus::CANCELLED];
+        $finished = $rows->whereIn('state', $ended)->count();
+        $states = $rows->pluck('state');
+
+        return [
+            'batch_id' => $batchId,
+            'state' => match (true) {
+                $finished < $rows->count() => JobStatus::RUNNING,
+                $states->contains(JobStatus::FAILED) => JobStatus::FAILED,
+                $states->every(fn ($s) => $s === JobStatus::DONE) => JobStatus::DONE,
+                default => JobStatus::CANCELLED,
+            },
+            'progress' => $finished / $rows->count(),
+            'finished' => $finished,
+            'total' => $rows->count(),
+            'jobs' => $rows->map(fn (ClearcutJob $row) => [
+                'id' => $row->id,
+                'video_id' => (string) $row->subject_id,
+                'job_id' => $row->service_job_id ?? $row->service_analysis_id,
+                'state' => $row->state,
+                'stage' => $row->stage,
+                'progress' => ($row->progress ?? 0) / 100,
+                'regions' => $row->regions,
+                'error' => $row->error,
+            ])->values()->all(),
+        ];
     }
 
     /** Stop whatever in a batch is still running. */
