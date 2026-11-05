@@ -301,8 +301,18 @@ recording's place instead:
   recording as `name_r.mp4`, `name_w.mp4` or `name_rw.mp4` (redacted,
   watermarked, both), `path` is pointed at it, and the public original is
   deleted — only after the private copy has matched the audit's source hash;
-- every later run starts from `_org` again, so nothing is redacted twice or
-  stamped with a second mark.
+- a later run starts from `_org` again by default, so nothing is redacted
+  twice or stamped with a second mark;
+- or, with `source: "processed"` on the start request, it continues from the
+  processed video: a private copy of it (`name_src.mp4`) is what the service
+  reads, and the result carries the passes of both (`_r` plus a watermark
+  becomes `_rw`). It is placed only if the processed video is still the one
+  it was made from — its audit's source hash is checked against it — and it
+  costs one more encode. `GET recordings/{recording}/url?source=original`
+  plays the private original through a signed route, so fragments and boxes
+  are chosen on the version the run reads.
+
+There is one processed video per recording: each placement replaces the last.
 
 The original stays private because it still holds what the redaction covers.
 This needs:

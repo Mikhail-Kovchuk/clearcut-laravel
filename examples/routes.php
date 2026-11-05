@@ -62,6 +62,12 @@ Route::get('uploads/{record}/video', [UploadController::class, 'video'])
     ->middleware('signed')
     ->name('clearcut.upload-video');
 
+// The same for a processed recording's private original, which a run from
+// the original reads. Signed by `recordings/{recording}/url?source=original`.
+Route::get('recordings/{recording}/original', [RecordingReviewController::class, 'originalVideo'])
+    ->middleware('signed')
+    ->name('clearcut.original-video');
+
 Route::middleware(['auth:sanctum', 'can:process-recordings'])
     ->prefix('recordings')
     ->group(function () {

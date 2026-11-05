@@ -25,13 +25,23 @@ use RuntimeException;
  *   service reads only that copy.
  * - Finished encode: verified against its audit, moved beside the recording as
  *   `name_r|w|rw.mp4`; `path` points at it, the public original is deleted.
- * - Later runs start from `_org`, so nothing is processed twice.
+ * - A later run starts from `_org` by default. Asked to continue from the
+ *   processed video instead, it reads a private copy of it (`name_src.mp4`),
+ *   and its result takes the passes of both: `_r` plus a watermark is `_rw`.
  *
  * The original stays private: it still holds the data the redaction covers.
+ * There is one processed video per recording; each placement replaces it.
  */
 class ClearcutFiles
 {
     private const SUFFIX = '_org';
+
+    /** The private copy of the processed video a continued run reads. */
+    private const CONTINUED = '_src';
+
+    public const SOURCE_ORIGINAL = 'original';
+
+    public const SOURCE_PROCESSED = 'processed';
 
     public function replaces(): bool
     {
@@ -53,9 +63,13 @@ class ClearcutFiles
      * The key the service reads from. With replacement on, makes the `_org`
      * copy on first use.
      *
+     * @param  string  $source  `processed` continues from the video now at
+     *                          `path`; a recording never processed has none,
+     *                          and starts from its original either way.
+     *
      * @throws RuntimeException when there is nothing to read
      */
-    public function sourceKeyFor(Model $recording): string
+    public function sourceKeyFor(Model $recording, string $source = self::SOURCE_ORIGINAL): string
     {
         if (! $this->replaces()) {
             $key = (string) $recording->getAttribute(
@@ -66,6 +80,10 @@ class ClearcutFiles
             }
 
             return $key;
+        }
+
+        if ($source === self::SOURCE_PROCESSED && $this->isProcessed($recording)) {
+            return $this->copyProcessed($recording);
         }
 
         $original = $this->originalOf($recording);
@@ -123,6 +141,98 @@ class ClearcutFiles
         $this->shareWithService($key);
 
         return $key;
+    }
+
+    /**
+     * A private copy of the processed video, for the service to read: it
+     * reads only the private disk. Made afresh for every run, over the last
+     * one — the processed video may have changed since.
+     */
+    private function copyProcessed(Model $recording): string
+    {
+        $path = $this->pathOf($recording);
+        $source = $this->public()->path($path);
+        if (! is_file($source)) {
+            throw new RuntimeException('The processed video is missing from storage.');
+        }
+
+        $key = (string) $this->continuedKeyFor($recording);
+        $target = $this->private()->path($key);
+        $temp = $target.'.part-'.bin2hex(random_bytes(4));
+        $started = microtime(true);
+
+        try {
+            if (! copy($source, $temp) || filesize($temp) !== filesize($source)) {
+                throw new RuntimeException('Could not copy the processed video to private storage.');
+            }
+            rename($temp, $target);
+        } finally {
+            if (is_file($temp)) {
+                @unlink($temp);
+            }
+        }
+
+        $this->log()->info('clearcut.processed_copied', [
+            'recording' => $recording->getKey(),
+            'key' => $key,
+            'from' => $path,
+            'bytes' => filesize($target),
+            'elapsed' => round(microtime(true) - $started, 1),
+        ]);
+
+        $this->shareWithService($key);
+
+        return $key;
+    }
+
+    /** Whether `path` holds a processed video rather than the recording itself. */
+    public function isProcessed(Model $recording): bool
+    {
+        return $this->replaces() && $this->passesOf($recording) !== '';
+    }
+
+    /**
+     * The passes in the processed video's name: `rw` for `name_rw.mp4`, '' for
+     * a recording not processed.
+     */
+    public function passesOf(Model $recording): string
+    {
+        $original = $this->originalOf($recording);
+        if ($original === null) {
+            return '';
+        }
+
+        $base = preg_replace('/'.preg_quote(self::SUFFIX, '/').'$/', '', pathinfo($original, PATHINFO_FILENAME));
+        $name = pathinfo($this->pathOf($recording), PATHINFO_FILENAME);
+
+        return preg_match('/^'.preg_quote((string) $base, '/').'_([rwt]+)$/', $name, $m) === 1 ? $m[1] : '';
+    }
+
+    /**
+     * The copy a continued run read (`dir/name_src.mp4`), where one may exist.
+     * Left behind by a run that failed or was stopped; deleted wherever the
+     * original is.
+     */
+    public function continuedKeyFor(Model $recording): ?string
+    {
+        $original = $this->originalOf($recording);
+        if ($original === null) {
+            return null;
+        }
+
+        $info = pathinfo($original);
+        $dir = $info['dirname'] !== '.' ? $info['dirname'].'/' : '';
+        $base = preg_replace('/'.preg_quote(self::SUFFIX, '/').'$/', '', $info['filename']);
+
+        return $dir.$base.self::CONTINUED.(isset($info['extension']) ? '.'.$info['extension'] : '');
+    }
+
+    /** Whether the row read the copy of the recording's processed video. */
+    private function continues(ClearcutJob $row, Model $recording): bool
+    {
+        $key = $this->continuedKeyFor($recording);
+
+        return $key !== null && $row->source_key === $key;
     }
 
     /**
@@ -187,9 +297,9 @@ class ClearcutFiles
 
     /**
      * A finished encode waiting to be put in place. Only one made from this
-     * recording's `_org` copy: a row from before replacement was switched on
-     * read the recording itself, and placing its output now would replace the
-     * recording with a stale result.
+     * recording's `_org` copy or from the copy of its processed video: a row
+     * from before replacement was switched on read the recording itself, and
+     * placing its output now would replace the recording with a stale result.
      */
     public function placeable(ClearcutJob $row): bool
     {
@@ -206,7 +316,8 @@ class ClearcutFiles
         $recording = $this->model()::find($row->subject_id);
 
         return $recording === null
-            || $row->source_key === ($this->originalOf($recording) ?? self::orgPath($this->pathOf($recording)));
+            || $row->source_key === ($this->originalOf($recording) ?? self::orgPath($this->pathOf($recording)))
+            || $this->continues($row, $recording);
     }
 
     private function doPlace(ClearcutJob $row): string
@@ -223,10 +334,26 @@ class ClearcutFiles
         $redacted = ($audit['mode'] ?? 'none') !== 'none';
         $watermarked = ($audit['mark_type'] ?? 'none') !== 'none';
         $trimmed = ! empty($audit['cuts']);
-        $passes = ($redacted ? 'r' : '').($watermarked ? 'w' : '').($trimmed ? 't' : '');
-        if ($passes === '') {
+        if (! $redacted && ! $watermarked && ! $trimmed) {
             throw new RuntimeException('its audit records neither a redaction, a watermark nor a cut');
         }
+
+        // Continued from the processed video: the result carries what that
+        // video already had, and must have been made from the one now in
+        // place — a run placed meanwhile would otherwise be silently undone.
+        $continued = $this->continues($row, $recording);
+        if ($continued) {
+            $current = $this->public()->path($this->pathOf($recording));
+            if (! is_file($current)
+                || ! hash_equals((string) ($audit['source_sha256'] ?? ''), hash_file('sha256', $current))) {
+                throw new RuntimeException('the processed video changed after this run started from it; start it again');
+            }
+            $before = $this->passesOf($recording);
+            $redacted = $redacted || str_contains($before, 'r');
+            $watermarked = $watermarked || str_contains($before, 'w');
+            $trimmed = $trimmed || str_contains($before, 't');
+        }
+        $passes = ($redacted ? 'r' : '').($watermarked ? 'w' : '').($trimmed ? 't' : '');
 
         $output = $this->private()->path($row->output_key);
         if (! is_file($output) || filesize($output) === 0) {
@@ -271,7 +398,7 @@ class ClearcutFiles
             throw new RuntimeException('the output could not be renamed into place');
         }
 
-        DB::transaction(function () use ($recording, $row, $dest, $destPath, $orgKey, $redacted, $watermarked, $trimmed) {
+        DB::transaction(function () use ($recording, $row, $dest, $destPath, $orgKey, $redacted, $watermarked, $trimmed, $continued) {
             $attributes = [
                 config('clearcut.recordings.path', 'path') => $dest,
                 config('clearcut.replace_original.original_path', 'original_path') => $orgKey,
@@ -281,12 +408,24 @@ class ClearcutFiles
             }
             $recording->forceFill($attributes)->save();
 
-            $row->update([
+            // A continued run's flags describe the video now in place, not
+            // only its own pass: they are what a page's badges show.
+            $row->update($continued ? [
+                'redacted' => $redacted,
+                'watermarked' => $watermarked,
+                'trimmed' => $trimmed,
+            ] : [
                 'redacted' => $row->redacted ?? $redacted,
                 'watermarked' => $row->watermarked ?? $watermarked,
                 'trimmed' => $row->trimmed ?? $trimmed,
             ]);
         });
+
+        // The copy it read has served its purpose.
+        if ($continued && $this->private()->exists((string) $row->source_key)) {
+            $this->private()->delete((string) $row->source_key);
+            $this->log()->info('clearcut.processed_copy_deleted', ['recording' => $recording->getKey(), 'key' => $row->source_key]);
+        }
 
         // The public original (first run) or the previous output.
         if ($oldPath !== $dest && $this->public()->exists($oldPath)) {
@@ -327,6 +466,11 @@ class ClearcutFiles
                 $this->log()->warning('clearcut.original_kept', ['recording' => $recording->getKey(), 'reason' => 'work_in_progress']);
 
                 continue;
+            }
+
+            $continued = $this->continuedKeyFor($recording);
+            if ($continued !== null && $this->private()->exists($continued)) {
+                $this->private()->delete($continued);
             }
 
             $key = $this->originalOf($recording) ?? self::orgPath($this->pathOf($recording));

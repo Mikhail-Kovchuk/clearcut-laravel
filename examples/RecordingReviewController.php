@@ -20,6 +20,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\URL;
 
 /**
  * EXAMPLE — published into app/Http/Controllers/ by clearcut:install.
@@ -47,6 +48,9 @@ class RecordingReviewController extends Controller
         'mark_size' => 'nullable|in:large,medium,small',
         'mark_speed' => 'nullable|numeric|between:0.25,2',
         'output_destination' => 'nullable|in:s3,local',
+        // Start from the original (the default) or continue from the
+        // processed video. A recording not processed yet has only the first.
+        'source' => 'nullable|in:original,processed',
         // Fragments to look in, seconds. Omitted: the whole recording. t1 > t0,
         // apart and at least half a second long is checked by the service.
         'ranges' => 'nullable|array|min:1|max:100',
@@ -145,7 +149,8 @@ class RecordingReviewController extends Controller
 
         try {
             // Encode choices are stored now so the later apply can use them.
-            $record = $this->newRecord($request, $recording, self::settingsFrom($validated, review: true));
+            $record = $this->newRecord($request, $recording, self::settingsFrom($validated, review: true),
+                $this->files->sourceKeyFor($recording, $validated['source'] ?? ClearcutFiles::SOURCE_ORIGINAL));
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 409);
         }
@@ -200,7 +205,8 @@ class RecordingReviewController extends Controller
         }
 
         try {
-            $record = $this->newRecord($request, $recording, self::settingsFrom($validated, review: false));
+            $record = $this->newRecord($request, $recording, self::settingsFrom($validated, review: false),
+                $this->files->sourceKeyFor($recording, $validated['source'] ?? ClearcutFiles::SOURCE_ORIGINAL));
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 409);
         }
@@ -247,14 +253,16 @@ class RecordingReviewController extends Controller
     }
 
     /**
-     * The row a job reports to.
+     * The row a job reports to. The source comes from
+     * `ClearcutFiles::sourceKeyFor()`: the original, or a copy of the
+     * processed video.
      *
      * @param  array<string, mixed>  $settings
      */
-    private function newRecord(Request $request, Model $recording, array $settings, ?string $sourceKey = null): ClearcutJob
+    private function newRecord(Request $request, Model $recording, array $settings, string $sourceKey): ClearcutJob
     {
         return ClearcutJob::create([
-            'source_key' => $sourceKey ?? $this->files->sourceKeyFor($recording),
+            'source_key' => $sourceKey,
             'subject_type' => $recording->getMorphClass(),
             'subject_id' => $recording->getKey(),
             'settings' => $settings,
@@ -331,7 +339,7 @@ class RecordingReviewController extends Controller
     {
         return array_intersect_key($validated, array_flip([
             'mode', 'profile', 'redaction_style', 'brand', 'mark_type',
-            'mark_size', 'mark_speed', 'output_destination', 'ranges', 'cuts',
+            'mark_size', 'mark_speed', 'output_destination', 'ranges', 'cuts', 'source',
         ])) + ['review' => $review];
     }
 
@@ -369,7 +377,9 @@ class RecordingReviewController extends Controller
 
         // All sources resolved before any row is created.
         try {
-            $sources = $recordings->map(fn (Model $r) => $this->files->sourceKeyFor($r));
+            $sources = $recordings->map(fn (Model $r) => $this->files->sourceKeyFor(
+                $r, $validated['source'] ?? ClearcutFiles::SOURCE_ORIGINAL,
+            ));
         } catch (\RuntimeException $e) {
             return response()->json(['message' => $e->getMessage()], 409);
         }
@@ -625,8 +635,12 @@ class RecordingReviewController extends Controller
             $this->files->place($row);
         }
 
-        $files = $recordings->map(fn (Model $recording) => ['id' => $recording->getKey()]
-            + self::fileState($rows->where('subject_id', $recording->getKey())))->values();
+        $files = $recordings->map(fn (Model $recording) => [
+            'id' => $recording->getKey(),
+            // The passes of the processed video now in place (`rw`), or
+            // null: a run can continue from it only when there is one.
+            'processed' => $this->files->isProcessed($recording) ? $this->files->passesOf($recording) : null,
+        ] + self::fileState($rows->where('subject_id', $recording->getKey())))->values();
 
         return response()->json([
             'enabled' => (bool) config('clearcut.enabled', true),
@@ -817,10 +831,21 @@ class RecordingReviewController extends Controller
     /**
      * A URL the player can load: signed and short-lived where the disk can
      * sign (S3, a served local disk), its plain URL otherwise.
+     *
+     * `?source=original` asks for the private original of a processed
+     * recording — what a run from the original reads, so what its fragments
+     * and boxes are measured on; anything else gives the video at `path`.
      */
-    public function videoUrl(string $recording): JsonResponse
+    public function videoUrl(Request $request, string $recording): JsonResponse
     {
-        $path = $this->files->pathOf($this->files->findRecording($recording));
+        $model = $this->files->findRecording($recording);
+        if ($request->query('source') === ClearcutFiles::SOURCE_ORIGINAL && $this->files->isProcessed($model)) {
+            return response()->json(['url' => URL::temporarySignedRoute(
+                'clearcut.original-video', now()->addMinutes(30), ['recording' => $model->getKey()],
+            )]);
+        }
+
+        $path = $this->files->pathOf($model);
         $disk = Storage::disk(config('clearcut.recordings.disk', 'public'));
 
         $url = $disk->providesTemporaryUrls()
@@ -828,6 +853,23 @@ class RecordingReviewController extends Controller
             : url($disk->url($path));
 
         return response()->json(['url' => $url]);
+    }
+
+    /**
+     * A processed recording's private original, for the player. Signed rather
+     * than authenticated: a <video> element cannot send a bearer token.
+     * Ranges are served, so the player can seek.
+     */
+    public function originalVideo(string $recording): mixed
+    {
+        $original = $this->files->originalOf($this->files->findRecording($recording));
+        $disk = Storage::disk(config('clearcut.replace_original.private_disk', 'local'));
+        abort_unless($original !== null && $disk->exists($original), 404);
+
+        return response()->file($disk->path($original), [
+            'Content-Type' => 'video/mp4',
+            'Cache-Control' => 'private, no-store',
+        ]);
     }
 
     /** The proposed regions, for the review screen. */
