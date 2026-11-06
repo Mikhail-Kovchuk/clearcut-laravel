@@ -76,6 +76,40 @@ class ClearcutClient
     }
 
     /**
+     * This package's installed release, as Composer recorded it ("v1.1.7"),
+     * or null when it cannot say — a path install, say.
+     */
+    public static function packageVersion(): ?string
+    {
+        if (! class_exists(\Composer\InstalledVersions::class)) {
+            return null;
+        }
+
+        try {
+            return \Composer\InstalledVersions::getPrettyVersion('clearcut/clearcut-laravel');
+        } catch (\OutOfBoundsException) {
+            return null;
+        }
+    }
+
+    /**
+     * The backend's and the service's releases, for a settings screen's
+     * Versions line. Never throws: the service's is null when it cannot be
+     * reached, which the screen shows as unknown.
+     *
+     * @return array{backend: string|null, service: string|null}
+     */
+    public function versions(): array
+    {
+        $health = $this->health();
+
+        return [
+            'backend' => self::packageVersion(),
+            'service' => isset($health['version']) ? (string) $health['version'] : null,
+        ];
+    }
+
+    /**
      * What the service is doing now — running and queued jobs, what ended in
      * the last hour, memory — for a status panel. Throws like every other
      * call; a page showing it should say the service is unreachable.

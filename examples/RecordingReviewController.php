@@ -144,6 +144,9 @@ class RecordingReviewController extends Controller
                 ], $this->clearcut->profiles()),
 
                 'output' => $this->clearcut->settings(),
+
+                // For the settings' Versions line, beside the interface's own.
+                'versions' => $this->clearcut->versions(),
             ]);
         } catch (ClearcutUnavailableException $e) {
             // 503: "try again", not "something broke".
