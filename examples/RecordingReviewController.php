@@ -78,6 +78,52 @@ class RecordingReviewController extends Controller
         return null;
     }
 
+    /**
+     * What the service is doing now, for a status panel: its jobs running and
+     * waiting, what ended in the last hour, memory. Each job carries the row
+     * it belongs to and a label for it; the service knows neither.
+     *
+     * Every job on the service is listed, not only this user's: the queue is
+     * shared, and "why is mine waiting" is answered by the others.
+     */
+    public function serviceStatus(): JsonResponse
+    {
+        try {
+            $status = $this->clearcut->status();
+        } catch (ClearcutUnavailableException $e) {
+            return response()->json(['message' => $e->getMessage()], 503);
+        } catch (ClearcutRequestException $e) {
+            return response()->json(['message' => $e->getMessage()], 502);
+        }
+
+        $all = [...$status->jobs, ...$status->recent];
+        $ids = array_map(static fn (JobStatus $job) => $job->jobId, $all);
+        $rows = ClearcutJob::whereIn('service_job_id', $ids)->orWhereIn('service_analysis_id', $ids)->get();
+
+        $describe = function (JobStatus $job) use ($rows): array {
+            $row = $rows->first(fn (ClearcutJob $r) => in_array($job->jobId, [$r->service_job_id, $r->service_analysis_id], true));
+
+            return $job->toArray() + [
+                'row_id' => $row?->id,
+                'label' => $row ? $this->labelFor($row) : null,
+            ];
+        };
+
+        return response()->json([
+            'jobs' => array_map($describe, $status->jobs),
+            'recent' => array_map($describe, $status->recent),
+        ] + $status->toArray());
+    }
+
+    /**
+     * How a job's recording is named on a status panel. Override with what
+     * a person would recognise — an order number, a file name.
+     */
+    protected function labelFor(ClearcutJob $row): string
+    {
+        return class_basename((string) $row->subject_type).' #'.$row->subject_id;
+    }
+
     /** Brands, profiles and output settings offered by the service. */
     public function options(): JsonResponse
     {

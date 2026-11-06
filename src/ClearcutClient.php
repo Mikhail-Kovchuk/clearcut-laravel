@@ -12,6 +12,7 @@ use Clearcut\Video\Data\DetectionProfile;
 use Clearcut\Video\Data\JobRequest;
 use Clearcut\Video\Data\JobStatus;
 use Clearcut\Video\Data\ProposedRegion;
+use Clearcut\Video\Data\ServiceStatus;
 use Clearcut\Video\Data\Upload;
 use Clearcut\Video\Exceptions\ClearcutException;
 use Clearcut\Video\Exceptions\ClearcutRequestException;
@@ -72,6 +73,16 @@ class ClearcutClient
         } catch (ConnectionException $e) {
             return ['reachable' => false, 'error' => $e->getMessage()];
         }
+    }
+
+    /**
+     * What the service is doing now — running and queued jobs, what ended in
+     * the last hour, memory — for a status panel. Throws like every other
+     * call; a page showing it should say the service is unreachable.
+     */
+    public function status(): ServiceStatus
+    {
+        return ServiceStatus::fromArray($this->send('GET', '/status'));
     }
 
     /**

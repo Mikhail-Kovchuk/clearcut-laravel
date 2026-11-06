@@ -75,6 +75,9 @@ Route::middleware(['auth:sanctum', 'can:process-recordings'])
         Route::get('options', [RecordingReviewController::class, 'options']);
         Route::get('brands/{slug}/preview', [RecordingReviewController::class, 'brandPreview']);
 
+        // What the service is doing now: every job on it, for a status panel.
+        Route::get('service-status', [RecordingReviewController::class, 'serviceStatus']);
+
         // Per-recording state and the run to resume (?video_ids[]=…), and
         // stopping their running work. Before the wildcards below.
         Route::get('status', [RecordingReviewController::class, 'recordingsStatus']);

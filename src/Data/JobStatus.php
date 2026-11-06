@@ -45,6 +45,10 @@ final class JobStatus
      * @param  bool|null  $stalled  whether a running job has gone without moving past the service's threshold
      * @param  array{position: int, running: list<array<string, mixed>>}|null  $queue
      *         a queued job's place in line and the jobs running ahead of it, as the service reports them
+     * @param  int|null  $stageElapsed  seconds the current stage has run; null unless running
+     * @param  int|null  $stageRemaining  seconds left in the current stage AT THE SPEED SO FAR — an
+     *                                    estimate, to be shown as one; null where it cannot be said
+     * @param  int|null  $finishedAt  unix time the job ended, by the service's clock
      */
     public function __construct(
         public readonly string $jobId,
@@ -74,6 +78,9 @@ final class JobStatus
         public readonly ?int $idle = null,
         public readonly ?bool $stalled = null,
         public readonly ?array $queue = null,
+        public readonly ?int $stageElapsed = null,
+        public readonly ?int $stageRemaining = null,
+        public readonly ?int $finishedAt = null,
     ) {
     }
 
@@ -122,6 +129,9 @@ final class JobStatus
             idle: isset($data['idle']) ? (int) $data['idle'] : null,
             stalled: isset($data['stalled']) ? (bool) $data['stalled'] : null,
             queue: isset($data['queue']) && is_array($data['queue']) ? $data['queue'] : null,
+            stageElapsed: isset($data['stage_elapsed']) ? (int) $data['stage_elapsed'] : null,
+            stageRemaining: isset($data['stage_remaining']) ? (int) $data['stage_remaining'] : null,
+            finishedAt: isset($data['finished_at']) ? (int) $data['finished_at'] : null,
         );
     }
 
@@ -210,6 +220,9 @@ final class JobStatus
             'idle' => $this->idle,
             'stalled' => $this->stalled,
             'queue' => $this->queue,
+            'stage_elapsed' => $this->stageElapsed,
+            'stage_remaining' => $this->stageRemaining,
+            'finished_at' => $this->finishedAt,
         ], static fn ($value) => $value !== null);
     }
 }
