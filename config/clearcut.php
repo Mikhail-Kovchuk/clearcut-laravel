@@ -131,4 +131,12 @@ return [
         'size' => null,
         'delete_originals' => (bool) env('CLEARCUT_DELETE_ORIGINALS', false),
     ],
+
+    /*
+     | Days the service keeps a finished analysis for its review (7). Past them
+     | it has deleted the regions, and a row still saying "awaiting review"
+     | would offer a review that can only fail: such rows are closed with a
+     | message to start again. Not longer than the service's own.
+     */
+    'review_days' => (int) env('CLEARCUT_REVIEW_DAYS', 7),
 ];

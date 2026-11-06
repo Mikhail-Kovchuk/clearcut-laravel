@@ -670,6 +670,14 @@ class RecordingReviewController extends Controller
         $recordings = $this->files->model()::findMany($validated['video_ids']);
         $rows = $this->rowsOf($recordings)->orderBy('id')->get();
 
+        // An analysis the service has since deleted is closed, not offered
+        // as a review that can only 404.
+        foreach ($rows as $row) {
+            if ($row->reviewExpired()) {
+                $row->markReviewExpired();
+            }
+        }
+
         foreach ($rows->whereIn('state', [JobStatus::QUEUED, JobStatus::RUNNING]) as $row) {
             try {
                 $row->syncFrom($this->clearcut->job((string) ($row->service_job_id ?? $row->service_analysis_id)));
@@ -933,7 +941,15 @@ class RecordingReviewController extends Controller
         try {
             $proposal = $this->clearcut->proposal($record->service_analysis_id);
         } catch (ClearcutRequestException $e) {
-            // A proposal expires after a week.
+            // The service deleted the regions (it keeps them for
+            // clearcut.review_days) or never had them. Said plainly, and the
+            // row closed, so the page stops offering this review.
+            if ($e->isNotFound() && $record->state === JobStatus::DONE && $record->service_job_id === null) {
+                $record->markReviewExpired();
+
+                return response()->json(['message' => $record->error], 410);
+            }
+
             return response()->json(['message' => $e->getMessage()], $e->status);
         }
 

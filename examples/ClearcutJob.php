@@ -7,6 +7,7 @@ namespace App\Models;
 use Clearcut\Video\Data\JobStatus;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\MorphTo;
+use Illuminate\Support\Facades\Log;
 
 /**
  * EXAMPLE — publish into app/Models/ and adapt:
@@ -154,10 +155,40 @@ class ClearcutJob extends Model
             || $this->awaitsReview();
     }
 
-    /** An analysis finished and not yet applied. */
+    /**
+     * An analysis finished and not yet applied — while the service still has
+     * its regions. It deletes them after `clearcut.review_days` and tells
+     * nobody; past that the row would offer a review that can only fail.
+     */
     public function awaitsReview(): bool
     {
-        return $this->state === JobStatus::DONE && $this->service_job_id === null;
+        return $this->state === JobStatus::DONE
+            && $this->service_job_id === null
+            && ! $this->reviewExpired();
+    }
+
+    /** Whether the service has deleted this analysis' regions by now. */
+    public function reviewExpired(): bool
+    {
+        $finished = $this->finished_at ?? $this->updated_at;
+
+        return $this->state === JobStatus::DONE
+            && $this->service_job_id === null
+            && $finished !== null
+            && $finished->lt(now()->subDays((int) config('clearcut.review_days', 7)));
+    }
+
+    /** Close an analysis whose regions the service no longer has. */
+    public function markReviewExpired(): void
+    {
+        $days = (int) config('clearcut.review_days', 7);
+        $this->update([
+            'state' => JobStatus::FAILED,
+            'stage' => 'failed',
+            'error' => "This analysis expired: its regions are kept for {$days} days and were deleted. Start it again.",
+            'claimed_at' => null,
+        ]);
+        Log::channel(config('clearcut.log_channel'))->info('clearcut.review_expired', ['job_row' => $this->id]);
     }
 
     /**
