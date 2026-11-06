@@ -60,6 +60,9 @@ class UploadController extends Controller
         'cuts' => 'nullable|array|min:1|max:100',
         'cuts.*.t0' => 'required|numeric|min:0',
         'cuts.*.t1' => 'required|numeric|min:0',
+        // Trades of coverage or output quality for time; see JobRequest::SPEEDUPS.
+        'speedups' => 'nullable|array|max:6',
+        'speedups.*' => 'string|in:ultrafast,fps30,merge_boxes,small_detector,sparse_reads,no_script_reread',
     ];
 
     public function __construct(private readonly ClearcutClient $clearcut) {}
@@ -198,6 +201,7 @@ class UploadController extends Controller
                 markSpeed: (float) ($settings['mark_speed'] ?? 1.0),
                 ranges: $settings['ranges'] ?? null,
                 cuts: $settings['cuts'] ?? null,
+                speedups: $settings['speedups'] ?? [],
             );
             $status = $review ? $this->clearcut->analyze($job) : $this->clearcut->process($job);
         } catch (\InvalidArgumentException|ClearcutRequestException $e) {

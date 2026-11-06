@@ -53,6 +53,20 @@ final class JobRequest
     public const OUTPUT_LOCAL = 'local';
 
     /**
+     * Named trades of coverage or output quality for time. Each is recorded
+     * in the audit. Detection ones change what is found; encode ones change
+     * the video delivered, never what is covered.
+     */
+    public const SPEEDUPS = [
+        'ultrafast',        // encode: x264 ultrafast, larger file
+        'fps30',            // encode: at most 30 fps out
+        'merge_boxes',      // encode: one field's boxes merged over time
+        'small_detector',   // detection: text found on a smaller frame
+        'sparse_reads',     // detection: a still screen read less often
+        'no_script_reread', // detection: no second read for non-Latin text
+    ];
+
+    /**
      * @param  string  $videoId  the caller's own identifier; appears in output keys and the audit file
      * @param  string  $sourceKey  a key in the service's bucket, NOT a URL
      * @param  string  $mode  fixed | auto | ai — each covers a superset of the one before
@@ -65,6 +79,7 @@ final class JobRequest
      * @param  float  $markSpeed  a multiple of the standard travel speed, 0.25 to 2.0
      * @param  array<int, array{t0: float, t1: float}>|null  $ranges  fragments to look in, seconds; null for the whole recording
      * @param  array<int, array{t0: float, t1: float}>|null  $cuts  what to cut out, seconds; a pass of its own — a job may only cut
+     * @param  list<string>  $speedups  names from self::SPEEDUPS; empty for none
      */
     public function __construct(
         public readonly string $videoId,
@@ -83,7 +98,13 @@ final class JobRequest
         public readonly float $markSpeed = 1.0,
         public readonly ?array $ranges = null,
         public readonly ?array $cuts = null,
+        public readonly array $speedups = [],
     ) {
+        $unknown = array_diff($speedups, self::SPEEDUPS);
+        if ($unknown !== []) {
+            throw new InvalidArgumentException('Unknown speed-up: '.implode(', ', $unknown));
+        }
+
         // An empty list is not "the whole recording" or "cut nothing": a
         // caller who chose no fragment chose nothing, and the service refuses
         // it for that reason.
@@ -163,6 +184,10 @@ final class JobRequest
 
         if ($this->outputDestination !== null) {
             $payload['output_destination'] = $this->outputDestination;
+        }
+
+        if ($this->speedups !== []) {
+            $payload['speedups'] = array_values(array_unique($this->speedups));
         }
 
         foreach (['ranges' => $this->ranges, 'cuts' => $this->cuts] as $name => $list) {

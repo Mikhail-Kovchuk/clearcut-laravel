@@ -48,6 +48,9 @@ class RecordingReviewController extends Controller
         'mark_size' => 'nullable|in:large,medium,small',
         'mark_speed' => 'nullable|numeric|between:0.25,2',
         'output_destination' => 'nullable|in:s3,local',
+        // Trades of coverage or output quality for time; see JobRequest::SPEEDUPS.
+        'speedups' => 'nullable|array|max:6',
+        'speedups.*' => 'string|in:ultrafast,fps30,merge_boxes,small_detector,sparse_reads,no_script_reread',
         // Start from the original (the default) or continue from the
         // processed video. A recording not processed yet has only the first.
         'source' => 'nullable|in:original,processed',
@@ -271,6 +274,7 @@ class RecordingReviewController extends Controller
                 markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
                 ranges: $validated['ranges'] ?? null,
                 cuts: $validated['cuts'] ?? null,
+                speedups: $validated['speedups'] ?? [],
             ));
         } catch (\InvalidArgumentException $e) {
             $record->delete();
@@ -385,7 +389,7 @@ class RecordingReviewController extends Controller
     {
         return array_intersect_key($validated, array_flip([
             'mode', 'profile', 'redaction_style', 'brand', 'mark_type',
-            'mark_size', 'mark_speed', 'output_destination', 'ranges', 'cuts', 'source',
+            'mark_size', 'mark_speed', 'output_destination', 'ranges', 'cuts', 'source', 'speedups',
         ])) + ['review' => $review];
     }
 
@@ -452,6 +456,7 @@ class RecordingReviewController extends Controller
                 markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
                 ranges: $validated['ranges'] ?? null,
                 cuts: $validated['cuts'] ?? null,
+                speedups: $validated['speedups'] ?? [],
             );
             $batch = $this->clearcut->processBatch(BatchRequest::of(
                 collect($records)->mapWithKeys(fn (ClearcutJob $r) => [(string) $r->id => $r->source_key])->all(),
@@ -1104,6 +1109,9 @@ class RecordingReviewController extends Controller
             'cuts' => 'nullable|array|max:100',
             'cuts.*.t0' => 'required|numeric|min:0',
             'cuts.*.t1' => 'required|numeric|min:0',
+            // The encode's speed-ups; detection's ran with the analysis.
+            'speedups' => 'nullable|array|max:6',
+            'speedups.*' => 'string|in:ultrafast,fps30,merge_boxes,small_detector,sparse_reads,no_script_reread',
         ]);
 
         if ($record->service_analysis_id === null) {
@@ -1130,6 +1138,8 @@ class RecordingReviewController extends Controller
                 markSize: $validated['mark_size'] ?? 'large',
                 markSpeed: (float) ($validated['mark_speed'] ?? 1.0),
                 cuts: $request->exists('cuts') ? ($validated['cuts'] ?? []) : null,
+                // Not sent by the review screen: the run's own choice from the start.
+                speedups: $validated['speedups'] ?? ($record->settings['speedups'] ?? []),
             );
         } catch (ClearcutRequestException $e) {
             // 409: regions still undecided, and would not be covered.
@@ -1142,7 +1152,7 @@ class RecordingReviewController extends Controller
             'reviewed_by_human' => true,
             // The reviewer's final choices over those the analysis started with.
             'settings' => array_intersect_key($validated, array_flip([
-                'redaction_style', 'brand', 'mark_type', 'mark_size', 'mark_speed', 'output_destination', 'cuts',
+                'redaction_style', 'brand', 'mark_type', 'mark_size', 'mark_speed', 'output_destination', 'cuts', 'speedups',
             ])) + ['review' => false] + ($record->settings ?? []),
         ]);
 

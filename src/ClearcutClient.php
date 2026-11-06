@@ -271,7 +271,11 @@ class ClearcutClient
      * `$cuts` replaces the analysis' cut: null leaves it as the analysis had
      * it, `[]` cuts nothing, a list cuts that.
      *
+     * `$speedups` are the encode's (JobRequest::SPEEDUPS); detection ones are
+     * taken from the analysis, which is where they ran.
+     *
      * @param  array<int, array{t0: float, t1: float}>|null  $cuts
+     * @param  list<string>  $speedups
      */
     public function apply(
         string $jobId,
@@ -283,6 +287,7 @@ class ClearcutClient
         string $markSize = 'large',
         float $markSpeed = 1.0,
         ?array $cuts = null,
+        array $speedups = [],
     ): JobStatus {
         $payload = [
             'redaction_style' => $redactionStyle,
@@ -294,6 +299,9 @@ class ClearcutClient
         ];
         if ($outputDestination !== null) {
             $payload['output_destination'] = $outputDestination;
+        }
+        if ($speedups !== []) {
+            $payload['speedups'] = array_values(array_intersect(JobRequest::SPEEDUPS, $speedups));
         }
         // Sent only when given: absent keeps the analysis' cut, and the
         // service tells absent from null by whether the key is there.
